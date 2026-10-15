@@ -1,0 +1,677 @@
+(function(){
+var OFF = {};               // { 'YYYY-MM-DD': { 'Add-on title': 1 } } add-ons switched off on that date (Availability by Date sheet)
+var SPECIAL = [];           // rows of the Special Prices sheet: {from,to,pkg,price,add,label}
+var PUSED = {};             // { 'YYYY-MM-DD': { 'Package title': how many are already taken that day } }
+var USED = {};              // { 'YYYY-MM-DD': { 'Add-on title': how many are already taken that day } }, loaded from the Google Sheet
+var DAYS = {};              // { 'YYYY-MM-DD': { 'Package title' or '*': 'booked'|'hold'|'unavailable' } }, loaded from the Google Sheet
+var daysState = 'loading';  // loading | ok | failed
+var today = new Date(); today.setHours(0,0,0,0);
+var sel = {pkg:null,date:null,name:'',phone:'',venue:'',time:'8:00 AM',hours:'22',delivery:true,notes:'',website:'',events:[],addons:{},landmark:'',pay:'',loc:null};
+var errors = {};
+var sending = false, sentOk = false;
+var view = new Date(today.getFullYear(), today.getMonth(), 1);
+var MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+var DOW=['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+function h(tag, props){
+  var e=document.createElement(tag); props=props||{};
+  Object.keys(props).forEach(function(k){
+    var v=props[k];
+    if(k==='class') e.className=v;
+    else if(k.slice(0,2)==='on') e.addEventListener(k.slice(2),v);
+    else if(v===true) e.setAttribute(k,'');
+    else if(v!==false && v!=null) e.setAttribute(k,v);
+  });
+  for(var i=2;i<arguments.length;i++){
+    [].concat(arguments[i]).forEach(function(c){
+      if(c==null||c===false) return;
+      e.append(c.nodeType?c:document.createTextNode(c));
+    });
+  }
+  return e;
+}
+function key(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function fromKey(k){var p=k.split('-');return new Date(+p[0],+p[1]-1,+p[2])}
+function longDate(k){return fromKey(k).toLocaleDateString('en-PH',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}
+function stateFor(k,t){   // status of a date for one package ('' = open)
+  var o=DAYS[k]; if(!o) return ''; if(o['*']) return o['*'];
+  t=t||(pkgById(sel.pkg)||{}).title; return t?(o[t]||''):'';
+}
+function num(s){return parseInt(String(s||'').replace(/[^\d]/g,''),10)||0}
+function peso(n){return '₱'+Number(n).toLocaleString('en-PH')}
+function capOf(x){var q=parseInt(x.qty,10); return isNaN(q)||q<1?1:Math.min(q,50)}   // total stock typed in the Add-ons sheet
+function usedOn(x){var u=sel.date&&USED[sel.date]; return (u&&u[x.title])||0}          // already booked on the chosen date
+function isOff(x){var o=sel.date&&OFF[sel.date]; return !!(o&&o[x.title])}              // switched off on the chosen date
+function maxQty(x){return isOff(x)?0:Math.max(0,capOf(x)-usedOn(x))}                              // what is still left on the chosen date
+function qtyOf(x){return Math.min(sel.addons[x.id]||0,maxQty(x))}
+function chosenAddons(){   // add-ons with a quantity above 0; each copy carries q (how many)
+  return (CONFIG.addons||[]).filter(function(x){return x.available&&qtyOf(x)>0}).map(function(x){var o={};for(var k in x)o[k]=x[k];o.q=qtyOf(x);return o});
+}
+function addonLabel(x){return x.title+(x.q>1?' x'+x.q:'')}
+function specialFor(p,k){   // Special Prices sheet: a different price on certain dates (null = normal price)
+  var best=null, bs=-1, base=num(p.price);
+  SPECIAL.forEach(function(r){
+    if(k<r.from||k>r.to) return; if(r.pkg&&r.pkg!==p.title) return;
+    var sc=r.pkg?1:0; if(sc>=bs){best=r;bs=sc}
+  });
+  if(!best) return null;
+  return {price:best.price!=null?best.price:Math.max(0,base+(best.add||0)),label:best.label||'Special rate'};
+}
+function priceOf(p){var s=sel.date&&specialFor(p,sel.date); return s?s.price:num(p.price)}
+function priceTag(p){var s=sel.date&&specialFor(p,sel.date); return s?s.label:'promo price'}
+/* booking window (Settings sheet): earliest and latest date customers can pick */
+function addDays(d,n){return new Date(d.getFullYear(),d.getMonth(),d.getDate()+n)}
+function winMin(){var v=parseInt(cfg('minDays','0'),10); return isNaN(v)||v<0?0:v}
+function winMax(){var v=parseInt(cfg('maxDays',''),10); return isNaN(v)||v<0?null:v}
+function openFrom(){return addDays(today,winMin())}
+function openTo(){var m=winMax(); return m==null?null:addDays(today,m)}
+function inWindow(dt){var t=openTo(); return dt>=openFrom()&&(!t||dt<=t)}
+function totalFee(){var p=pkgById(sel.pkg);return (p?priceOf(p):0)+chosenAddons().reduce(function(s,x){return s+num(x.price)*x.q},0)}
+function fmtPhone(v){
+  var d=String(v).replace(/\D/g,''); if(d.length>11&&d.indexOf('63')===0) d='0'+d.slice(2);
+  d=d.slice(0,11); return [d.slice(0,4),d.slice(4,7),d.slice(7,11)].filter(Boolean).join(' ');
+}
+function slug(t){return String(t).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')}
+function imgSrc(u,w){
+  u=String(u).trim();
+  var m=u.match(/drive\.google\.com\/file\/d\/([\w-]+)/)||u.match(/drive\.google\.com\/(?:open|uc)\?(?:[^#]*&)?id=([\w-]+)/);
+  return m?'https://drive.google.com/thumbnail?id='+m[1]+'&sz=w'+(w||1000):u;
+}
+function availPkgs(){return CONFIG.packages.filter(function(p){return p.available!==false})}
+function pcap(p){var q=parseInt(p.qty,10); return isNaN(q)||q<1?1:Math.min(q,50)}   // how many of this package can be booked on one date
+function pseats(p,k){var u=PUSED[k]; return Math.max(0,pcap(p)-((u&&u[p.title])||0))}
+function leftFor(k){var o=DAYS[k]||{}; if(o['*']) return 0; return availPkgs().filter(function(p){return !o[p.title]}).length}
+function pkgById(id){return CONFIG.packages.filter(function(p){return p.id===id})[0]}
+function messengerName(){
+  if(!flag('showMessenger')) return '';
+  var m=cfg('messenger',CONFIG.messenger).replace(/[?#].*$/,'').replace(/\/+$/,'');
+  return m.split('/').pop().replace(/^@/,'');
+}
+function phoneOk(v){
+  var d=String(v).replace(/\D/g,'');
+  return /^09\d{9}$/.test(d);   // 11 digits, like 0995 252 5426
+}
+
+/* ---------- skeleton ---------- */
+var app=document.getElementById('app');
+var pkgBox=h('div',{class:'pkgs',role:'radiogroup','aria-label':'Package'});
+var pkgErr=h('p',{class:'err',id:'e-pkg',role:'alert'});
+var calBox=h('div',{id:'cal'});
+var calErr=h('p',{class:'err',id:'e-date',role:'alert'});
+var formBox=h('div',{id:'formbox'});
+var addonBox=h('div',{});
+
+// The header text and background image can be changed by the owner in the "Settings" sheet of the Google Sheet.
+// Built-in text, used ONLY when the Google Sheet has no Settings sheet (or has no row for a setting).
+// Once your Settings sheet exists, the text comes from the sheet only: a blank cell hides that line.
+var FALLBACK={pausedMsg:'Online booking is paused right now. Please message us to book.',eyebrow:'Reserve Now',title:CONFIG.name,subtitle:'Videoke sets for birthdays, debuts, reunions and fiestas. Pick a package and date, then send your request.',
+  step1:'Pick a package',step1note:'All prices shown are promo prices.',addonsTitle:'Add-ons',addonsNote:'Tick the add-ons you want, then choose how many. It is included in your total rental fee.',
+  step2:'Pick a date',calNote:'Each date shows how many packages are left. Pick a package above to check yours.',step3:'Your details and request',reqTitle:'Your request',
+  sendBtn:'Send booking request',locNote:'By sending this request, you allow your location to be shared with {name}.',
+  gcashTitle:'Pay with GCash',gcashNote:'Already confirmed? Pay here. The reservation fee is included in your total rental fee.',
+  gcashHint:'Open GCash, tap Send Money, and enter the exact amount of your total rental fee.',remTitle:'Reminder',
+  footer:'Your date is not reserved until we reply and confirm.',doneTitle:'Request sent!',
+  doneMsg:'Thank you, {customer}. We will contact you at {phone} to confirm your date for {date}.',
+  doneNote:'Your date is not reserved until we reply and confirm.',
+  doneShot:'Please send screenshots of your payment so we can verify and confirm your reservation. Thank you!'};
+(function(){ var r=CONFIG.rules||{};
+  FALLBACK.rem1='The reservation fee is included in your total rental fee. It is not an extra charge.';
+  FALLBACK.rem2='A '+peso(r.deposit)+' security deposit is collected upon delivery. It is refundable upon pick up, as long as there is no damage and no missing equipment.';
+  FALLBACK.rem3='Delivery is free within '+r.freeKm+' km. Beyond '+r.freeKm+' km, it is '+peso(r.perKm)+' for every additional kilometer.';
+})();
+var ST={}, HAVE=false;   // text from the Settings sheet. Blank cell = hidden, a single - = hidden too.
+// Remember the last Settings text on this device, so the page shows it right away on the next visit.
+try{ var _c=JSON.parse(localStorage.getItem('arSettings')||'null'); if(_c&&typeof _c==='object'){ ST=_c; HAVE=true; } }catch(e){}
+function tx(k){
+  if(!HAVE||!(k in ST)) return FALLBACK[k]||'';
+  var v=String(ST[k]==null?'':ST[k]).trim(); return v==='-'?'':v;
+}
+// cfg: a value (like a phone number) from the Settings sheet; config.js is used only until the sheet has that row.
+function cfg(k,fb){
+  if(HAVE&&(k in ST)){ var v=String(ST[k]==null?'':ST[k]).trim(); return v==='-'?'':v; }
+  return fb==null?'':String(fb);
+}
+// flag: an on/off switch from the Settings sheet. Only No / Off / Hide / False / 0 turn it off.
+function flag(k){
+  if(!HAVE||!(k in ST)) return true;
+  var v=String(ST[k]==null?'':ST[k]).trim().toLowerCase();
+  return !(v==='no'||v==='off'||v==='hide'||v==='false'||v==='0');
+}
+var heroEl=h('header',{class:'hero'}), eyebrowEl=h('p',{class:'eyebrow'},FALLBACK.eyebrow), titleEl=h('h1',{},CONFIG.name), subEl=h('p',{},FALLBACK.subtitle);
+heroEl.append(h('div',{class:'hero-in'},CONFIG.logo?h('img',{class:'logo',src:CONFIG.logo,alt:CONFIG.name+' logo'}):null,h('div',{},eyebrowEl,titleEl,subEl)));
+var step1T=h('span',{},FALLBACK.step1), step1N=h('p',{class:'promo-note'},FALLBACK.step1note), step2T=h('span',{},FALLBACK.step2), step3T=h('span',{},FALLBACK.step3);
+var footEl=h('p',{class:'foot'},FALLBACK.footer), remWrap=h('div',{class:'rem-wrap'}), payWrap=h('div',{});
+var callEl=h('p',{class:'hint'}), pausedEl=h('p',{class:'note',role:'status'});
+function applyText(s){
+  if(s){ ST=s; HAVE=true; try{ localStorage.setItem('arSettings',JSON.stringify(s)); }catch(e){} }
+  eyebrowEl.textContent=tx('eyebrow');
+  var t=tx('title')||CONFIG.name; titleEl.textContent=t; document.title=t+' Booking';
+  subEl.textContent=tx('subtitle');
+  step1T.textContent=tx('step1'); step1N.textContent=tx('step1note'); step1N.hidden=!tx('step1note');
+  step2T.textContent=tx('step2'); step3T.textContent=tx('step3');
+  footEl.textContent=tx('footer'); footEl.hidden=!tx('footer');
+  reqTitleEl.textContent=tx('reqTitle'); locNoteEl.textContent=tx('locNote').replace('{name}',CONFIG.name); locNoteEl.hidden=!tx('locNote');
+  if(!sending) submitBtn.textContent=tx('sendBtn');
+  var acc=flag('acceptRequests');   // Settings sheet: Accept booking requests = No pauses the Send button
+  if(!sending) submitBtn.disabled=!acc;
+  pausedEl.textContent=tx('pausedMsg'); pausedEl.hidden=acc;
+  var ph=flag('showCall')?cfg('phone',CONFIG.phone):'';
+  callEl.replaceChildren(); if(ph) callEl.append('You can also call or text: ',h('a',{class:'tel',href:'tel:+'+intl(ph)},ph)); callEl.hidden=!ph;
+  var img=String(ST.image||'').trim(), col=String(ST.color||'').trim();
+  heroEl.style.backgroundColor=/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(col)?col:'';
+  if(img){
+    var d=parseInt(ST.dark,10); if(isNaN(d)) d=55; d=Math.min(90,Math.max(0,d));
+    var a=(d/100).toFixed(2);   // a dark shade keeps the white text readable on any photo
+    heroEl.style.backgroundImage='linear-gradient(rgba(10,8,30,'+a+'),rgba(10,8,30,'+a+')),url("'+imgSrc(img,2000).replace(/"/g,'%22')+'")';
+    heroEl.style.backgroundSize='cover'; heroEl.style.backgroundPosition='center';
+  } else {
+    heroEl.style.backgroundImage=''; heroEl.style.backgroundSize=''; heroEl.style.backgroundPosition='';
+  }
+}
+app.append(
+  heroEl,
+  h('main',{},
+    h('section',{class:'step'},h('h2',{},h('span',{class:'num'},'1'),step1T),step1N,pkgBox,pkgErr,addonBox),
+    h('section',{class:'step'},h('h2',{},h('span',{class:'num'},'2'),step2T),calBox,calErr),
+    h('section',{class:'step'},h('h2',{},h('span',{class:'num'},'3'),step3T),formBox),
+    payWrap,
+    remWrap,
+    footEl)
+);
+document.title = CONFIG.name + ' Booking';
+
+/* ---------- packages ---------- */
+function seatText(p){
+  if(p.available===false) return '';
+  if(sel.date){ var st=stateFor(sel.date,p.title); if(st) return (st==='unavailable'?'Not available on ':st==='hold'?'On hold on ':'Fully booked on ')+shortDate(sel.date); var n=pseats(p,sel.date); return n+(n===1?' set':' sets')+' available on '+shortDate(sel.date); }
+  return pcap(p)>1?'Up to '+pcap(p)+' sets available per date':'';
+}
+function renderPkgs(){
+  pkgBox.replaceChildren.apply(pkgBox, CONFIG.packages.map(function(p){
+    var on = sel.pkg===p.id, tk = sel.date?stateFor(sel.date,p.title):'', off = p.available===false || !!tk;   // taken or set to No on the chosen date: gray and not selectable
+    return h('button',{type:'button',class:'pkg'+(off?' off':''),disabled:off,role:'radio','aria-checked':on?'true':'false',onclick:function(){
+      sel.pkg=p.id; pkgErr.textContent=''; renderPkgs();
+      var bad=sel.date?stateFor(sel.date):''; var was=sel.date; if(bad) sel.date=null;
+      renderCal(); renderSummary(); if(bad) showTaken(was,bad);
+    }},
+      h('div',{class:'pkg-row'},
+        h('div',{class:'pkg-img'},h('img',{src:imgSrc(p.image||'images/'+slug(p.title)+'.jpg'),alt:p.title,loading:'lazy',onerror:function(e){e.target.replaceWith(document.createTextNode(p.icon||'🎤'))}})),
+        h('div',{class:'pkg-main'},
+          h('div',{class:'pkg-top'},
+            h('span',{class:'pkg-title'},p.title),
+            p.available===false?h('span',{class:'soon'},'Not available'):(tk?h('span',{class:'soon'},({hold:'On hold',booked:'Booked',unavailable:'Not available'})[tk]||'Not available'):null),
+            (function(){var s=sel.date&&specialFor(p,sel.date);
+              return s?h('span',{class:'pkg-price'},h('span',{class:'promo sp'},s.label),peso(s.price)+' ',h('small',{},(p.note?p.note+' · ':'')+'rate for '+shortDate(sel.date)))
+                      :h('span',{class:'pkg-price'},h('span',{class:'promo'},'Promo'),p.regular?h('s',{},'₱'+p.regular):null,'₱'+p.price+' ',h('small',{},p.note||''))})()),
+          seatText(p)?h('p',{class:'seats'},seatText(p)):null,
+          h('ul',{},(p.items||[]).map(function(i){return h('li',{},i)})))));
+  }));
+}
+var addonDate='';
+function renderAddons(){
+  addonDate=sel.date||'';
+  if(!(CONFIG.addons||[]).length){addonBox.replaceChildren();return}
+  var rows=(CONFIG.addons||[]).map(function(x){
+    var max=maxQty(x), ok=x.available&&max>0;
+    if(sel.addons[x.id]){ if(!ok) delete sel.addons[x.id]; else if(sel.addons[x.id]>max) sel.addons[x.id]=max; }   // stock dropped: keep the choice valid
+    var cur=ok?qtyOf(x):0, opts=[];
+    for(var i=1;i<=Math.max(1,max);i++) opts.push(h('option',{value:String(i),selected:i===(cur||1)},String(i)));
+    var pick=h('select',{id:'q-'+x.id,'aria-label':'How many '+x.title,disabled:!(ok&&cur>0)},opts);
+    pick.addEventListener('change',function(){ sel.addons[x.id]=parseInt(pick.value,10)||1; renderSummary(); });
+    var box=h('input',{type:'checkbox',id:'ad-'+x.id,'aria-label':'Add '+x.title,disabled:!ok,checked:cur>0});
+    box.addEventListener('change',function(){
+      if(box.checked){ sel.addons[x.id]=parseInt(pick.value,10)||1; pick.disabled=false; }
+      else { delete sel.addons[x.id]; pick.disabled=true; }
+      renderSummary();
+    });
+    var stock=!x.available?null:(sel.date?(max>0?max+' left on '+shortDate(sel.date):(isOff(x)?'Not available on '+shortDate(sel.date):'All booked on '+shortDate(sel.date))):'Up to '+capOf(x)+' available');
+    return h('tr',{class:ok?'':'off'},
+      h('td',{class:'ck'},h('div',{class:'pickrow'},box,pick)),
+      h('td',{},h('label',{for:'ad-'+x.id},x.title),x.note?h('small',{class:'sub-note'},x.note):null,stock?h('small',{class:'sub-note'},stock):null),
+      h('td',{},x.available?[h('span',{class:'promo'},'Promo'),x.regular?h('s',{},'₱'+x.regular):null,' ₱'+x.price+(capOf(x)>1?' each':'')]:h('span',{class:'soon'},'Not available, coming soon')));
+  });
+  addonBox.replaceChildren.apply(addonBox,[h('h3',{class:'sub'},tx('addonsTitle')),tx('addonsNote')?h('p',{class:'promo-note'},tx('addonsNote')):'',
+    h('div',{class:'tblwrap'},h('table',{class:'addons'},
+      h('thead',{},h('tr',{},h('th',{},'Add / Qty'),h('th',{},'Add-on'),h('th',{},'Promo price'))),h('tbody',{},rows)))]);
+}
+function remList(){
+  var out=[];
+  for(var i=1;i<=5;i++){ var v=tx('rem'+i); if(v) out.push(v); }
+  return out;
+}
+function remindersEl(){
+  var items=remList(); if(!items.length) return null;
+  return h('div',{class:'reminders'},h('strong',{},tx('remTitle')),h('ul',{},items.map(function(x){return h('li',{},x)})));
+}
+function renderRem(){ var n=remindersEl(); remWrap.replaceChildren.apply(remWrap,n?[n]:[]); }
+
+/* ---------- GCash ---------- */
+function gnum(){
+  if(!flag('showGcash')) return '';
+  return cfg('gcashNumber',(CONFIG.gcash||{}).number).replace(/\D/g,'').replace(/^(\d{4})(\d{3})(\d{4})$/,'$1 $2 $3');
+}
+function gname(){return cfg('gcashName',(CONFIG.gcash||{}).name)}
+function hasPay(){ return !!gnum() || CONFIG.packages.some(function(p){return p.payUrl}); }
+function copyBtn(txt,label){
+  return h('button',{type:'button',class:'btn alt',onclick:function(e){
+    var b=e.currentTarget;
+    (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(function(){b.textContent='Copied!'},function(){window.prompt('Copy this:',txt)});
+  }},label);
+}
+function payRow(title,amt,url){
+  var n=[h('span',{class:'pay-name'},title+' · '+peso(amt))];
+  if(url) n.push(h('a',{class:'btn gcash',href:url,target:'_blank',rel:'noopener'},'Pay '+peso(amt)+' with GCash'));
+  else if(gnum()) n.push(copyBtn(gnum().replace(/\s/g,''),'Copy GCash number'));
+  return h('div',{class:'payrow'},n);
+}
+// Messenger, Viber and WhatsApp buttons with icons. Numbers come from config.js (viber, whatsapp). '' hides a button.
+function intl(v){var d=String(v||'').replace(/\D/g,''); if(d.indexOf('0')===0) d='63'+d.slice(1); return d}
+function svgIcon(path){
+  var s=document.createElement('span'); s.className='ico'; s.setAttribute('aria-hidden','true');
+  s.innerHTML='<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" focusable="false"><path d="'+path+'"/></svg>';
+  return s;
+}
+var ICO={   // official brand logos (Simple Icons, CC0)
+  msgr:'M.001 11.639C.001 4.949 5.241 0 12.001 0S24 4.95 24 11.639c0 6.689-5.24 11.638-12 11.638-1.21 0-2.38-.16-3.47-.46a.96.96 0 00-.64.05l-2.39 1.05a.96.96 0 01-1.35-.85l-.07-2.14a.97.97 0 00-.32-.68A11.39 11.389 0 01.002 11.64zm8.32-2.19l-3.52 5.6c-.35.53.32 1.139.82.75l3.79-2.87c.26-.2.6-.2.87 0l2.8 2.1c.84.63 2.04.4 2.6-.48l3.52-5.6c.35-.53-.32-1.13-.82-.75l-3.79 2.87c-.25.2-.6.2-.86 0l-2.8-2.1a1.8 1.8 0 00-2.61.48z',
+  viber:'M11.4 0C9.473.028 5.333.344 3.02 2.467 1.302 4.187.696 6.7.633 9.817.57 12.933.488 18.776 6.12 20.36h.003l-.004 2.416s-.037.977.61 1.177c.777.242 1.234-.5 1.98-1.302.407-.44.972-1.084 1.397-1.58 3.85.326 6.812-.416 7.15-.525.776-.252 5.176-.816 5.892-6.657.74-6.02-.36-9.83-2.34-11.546-.596-.55-3.006-2.3-8.375-2.323 0 0-.395-.025-1.037-.017zm.058 1.693c.545-.004.88.017.88.017 4.542.02 6.717 1.388 7.222 1.846 1.675 1.435 2.53 4.868 1.906 9.897v.002c-.604 4.878-4.174 5.184-4.832 5.395-.28.09-2.882.737-6.153.524 0 0-2.436 2.94-3.197 3.704-.12.12-.26.167-.352.144-.13-.033-.166-.188-.165-.414l.02-4.018c-4.762-1.32-4.485-6.292-4.43-8.895.054-2.604.543-4.738 1.996-6.173 1.96-1.773 5.474-2.018 7.11-2.03zm.38 2.602c-.167 0-.303.135-.304.302 0 .167.133.303.3.305 1.624.01 2.946.537 4.028 1.592 1.073 1.046 1.62 2.468 1.633 4.334.002.167.14.3.307.3.166-.002.3-.138.3-.304-.014-1.984-.618-3.596-1.816-4.764-1.19-1.16-2.692-1.753-4.447-1.765zm-3.96.695c-.19-.032-.4.005-.616.117l-.01.002c-.43.247-.816.562-1.146.932-.002.004-.006.004-.008.008-.267.323-.42.638-.46.948-.008.046-.01.093-.007.14 0 .136.022.27.065.4l.013.01c.135.48.473 1.276 1.205 2.604.42.768.903 1.5 1.446 2.186.27.344.56.673.87.984l.132.132c.31.308.64.6.984.87.686.543 1.418 1.027 2.186 1.447 1.328.733 2.126 1.07 2.604 1.206l.01.014c.13.042.265.064.402.063.046.002.092 0 .138-.008.31-.036.627-.19.948-.46.004 0 .003-.002.008-.005.37-.33.683-.72.93-1.148l.003-.01c.225-.432.15-.842-.18-1.12-.004 0-.698-.58-1.037-.83-.36-.255-.73-.492-1.113-.71-.51-.285-1.032-.106-1.248.174l-.447.564c-.23.283-.657.246-.657.246-3.12-.796-3.955-3.955-3.955-3.955s-.037-.426.248-.656l.563-.448c.277-.215.456-.737.17-1.248-.217-.383-.454-.756-.71-1.115-.25-.34-.826-1.033-.83-1.035-.137-.165-.31-.265-.502-.297zm4.49.88c-.158.002-.29.124-.3.282-.01.167.115.312.282.324 1.16.085 2.017.466 2.645 1.15.63.688.93 1.524.906 2.57-.002.168.13.306.3.31.166.003.305-.13.31-.297.025-1.175-.334-2.193-1.067-2.994-.74-.81-1.777-1.253-3.05-1.346h-.024zm.463 1.63c-.16.002-.29.127-.3.287-.008.167.12.31.288.32.523.028.875.175 1.113.422.24.245.388.62.416 1.164.01.167.15.295.318.287.167-.008.295-.15.287-.317-.03-.644-.215-1.178-.58-1.557-.367-.378-.893-.574-1.52-.607h-.018z',
+  call:'M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z',
+  wapp:'M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z'
+};
+function contactRow(){
+  var mn=messengerName(), b=[];
+  var cph=flag('showCall')?cfg('phone',CONFIG.phone):'';
+  if(cph) b.push(h('a',{class:'btn contact call',href:'tel:+'+intl(cph)},svgIcon(ICO.call),'Call '+cph));   // tap = the phone dials right away
+  var vb=flag('showViber')?intl(cfg('viber',CONFIG.viber===undefined?CONFIG.phone:CONFIG.viber)):'';
+  var wa=flag('showWhatsapp')?intl(cfg('whatsapp',CONFIG.whatsapp===undefined?CONFIG.phone:CONFIG.whatsapp)):'';
+  if(wa) b.push(h('a',{class:'btn contact wapp',href:'https://wa.me/'+wa,target:'_blank',rel:'noopener'},svgIcon(ICO.wapp),'WhatsApp'));
+  if(vb) b.push(h('a',{class:'btn contact viber',href:'viber://chat?number=%2B'+vb,rel:'noopener'},svgIcon(ICO.viber),'Viber'));
+  if(mn) b.push(h('a',{class:'btn contact msgr',href:'https://m.me/'+encodeURIComponent(mn),target:'_blank',rel:'noopener'},svgIcon(ICO.msgr),'Messenger'));
+  return b.length?h('div',{class:'contacts'},b):null;
+}
+function msgrSendBtn(){   // copies the booking details (with the map link) and opens Messenger, so the customer only pastes and sends
+  var mn=messengerName(); if(!mn) return null;
+  return h('a',{class:'btn contact msgr',href:'https://m.me/'+encodeURIComponent(mn),target:'_blank',rel:'noopener',onclick:function(){
+    try{ if(navigator.clipboard) navigator.clipboard.writeText(messageText()); }catch(x){}
+  }},svgIcon(ICO.msgr),'Send my details & location on Messenger');
+}
+function shotNote(){
+  return h('p',{class:'hint'},'You can send a screenshot of your payment (reservation fee or full payment) using the buttons below.');
+}
+function payInfo(){
+  return gnum()?h('p',{class:'hint'},'GCash number: ',h('strong',{},gnum()),gname()?' ('+gname()+')':'','. Open GCash, tap Send Money, and enter the exact amount.'):null;
+}
+function payInfoFull(){
+  return [payInfo(),shotNote()];
+}
+function paySection(){
+  if(!gnum()) return null;
+  return h('section',{class:'step'},h('h2',{},tx('gcashTitle')),
+    tx('gcashNote')?h('p',{class:'hint',style:'margin:0 0 .6rem'},tx('gcashNote')):null,
+    h('div',{class:'payrow'},h('span',{class:'pay-name'},'GCash number: '+gnum()+(gname()?' ('+gname()+')':'')),copyBtn(gnum().replace(/\s/g,''),'Copy GCash number')),
+    tx('gcashHint')?h('p',{class:'hint'},tx('gcashHint')):null,
+    shotNote(),
+    contactRow());
+}
+function renderPay(){ var n=paySection(); payWrap.hidden=!n; payWrap.replaceChildren.apply(payWrap,n?[n]:[]); }
+
+/* ---------- calendar ---------- */
+var dlg=h('dialog',{class:'dlg','aria-labelledby':'dlg-t',onclick:function(e){if(e.target===dlg)dlg.close()}});
+document.body.append(dlg);
+var STATE_TXT={hold:'on hold',booked:'booked',unavailable:'not available'}, STATE_SHORT={hold:'Hold',booked:'Booked',unavailable:'N/A'};
+function shortDate(k){return fromKey(k).toLocaleDateString('en-PH',{weekday:'short',month:'short',day:'numeric'})}
+function pick(k){
+  var d=fromKey(k); sel.date=k; view=new Date(d.getFullYear(),d.getMonth(),1);
+  calErr.textContent=''; renderCal(); renderSummary();
+}
+function nearOpen(k){
+  var d=fromKey(k), out=[];
+  for(var i=1;i<=60&&out.length<3;i++) [i,-i].forEach(function(o){
+    var x=new Date(d.getFullYear(),d.getMonth(),d.getDate()+o), xk=key(x);
+    if(out.length<3 && x>=today && inWindow(x) && !stateFor(xk) && leftFor(xk)>0) out.push(xk);
+  });
+  return out.sort();
+}
+function showDlg(title,msg,k,extra){
+  var near=k?nearOpen(k):[], mn=messengerName();
+  if(dlg.open) dlg.close();
+  dlg.replaceChildren(
+    h('h3',{id:'dlg-t'},title), h('p',{},msg),
+    extra||'',
+    near.length?h('p',{class:'hint'},pkgById(sel.pkg)?'Closest open dates for the '+pkgById(sel.pkg).title+':':'Closest dates with openings:'):'',
+    h('div',{class:'chips'},near.map(function(x){return h('button',{type:'button',class:'chip',onclick:function(){dlg.close();pick(x)}},shortDate(x))})),
+    h('div',{class:'actions'},
+      h('button',{type:'button',class:'btn',autofocus:true,onclick:function(){dlg.close()}},'Choose another date'),
+      mn?h('a',{class:'btn alt',href:'https://m.me/'+encodeURIComponent(mn),target:'_blank',rel:'noopener'},'Message us'):''));
+  dlg.showModal();
+}
+function showTaken(k,st){
+  var cp=pkgById(sel.pkg), t=cp?cp.title:'', all=!!(DAYS[k]&&DAYS[k]['*']);
+  var alt=all?[]:CONFIG.packages.filter(function(p){return p.id!==sel.pkg && p.available!==false && !stateFor(k,p.title)});
+  var msg;
+  if(all) msg=' is not available.';
+  else if(!alt.length) msg=' is fully booked. All packages are booked or on hold.';
+  else if(st==='unavailable') msg=' is not available for the '+t+'.';
+  else if(st==='hold') msg=' is on hold for the '+t+'. It may open up if the other customer does not confirm.';
+  else msg=' is already booked for the '+t+'.';
+  var extra=alt.length?h('div',{},h('p',{class:'hint'},'Same date, still open for:'),
+    h('div',{class:'chips'},alt.map(function(p){return h('button',{type:'button',class:'chip',onclick:function(){dlg.close();sel.pkg=p.id;renderPkgs();pick(k)}},p.title)}))):'';
+  showDlg(alt.length?(t?t+' is already taken':'That package is taken')+' on this date':'Sorry, that date is not available',longDate(k)+msg,k,extra);
+}
+
+function renderCal(){
+  var fm=new Date(openFrom().getFullYear(),openFrom().getMonth(),1), lm=openTo()?new Date(openTo().getFullYear(),openTo().getMonth(),1):null;
+  if(view<fm) view=fm; else if(lm&&view>lm) view=lm;   // keep the calendar on months that can be booked
+  var y=view.getFullYear(), m=view.getMonth();
+  var first=new Date(y,m,1), n=new Date(y,m+1,0).getDate(), openDays=0, N=availPkgs().length;
+  var canPrev = view > fm;
+  var limit = new Date(today.getFullYear(), today.getMonth()+12,1);
+  var canNext = new Date(y,m+1,1) < limit && (!lm || new Date(y,m+1,1) <= lm);
+  var cp=pkgById(sel.pkg), cells=[];
+  DOW.forEach(function(d){cells.push(h('div',{class:'dow'},d))});
+  for(var i=0;i<first.getDay();i++) cells.push(h('span',{class:'day empty'}));
+  for(var d=1; d<=n; d++){
+    (function(d){
+      var dt=new Date(y,m,d), k=key(dt), past=dt<today, out=!past&&!inWindow(dt), off=past||out, o=DAYS[k]||{}, blocked=!!o['*'];
+      var left=off?0:leftFor(k), mine=(!off&&!blocked&&cp&&o[cp.title])?true:false, cls, lab, say;
+      var allBooked=!blocked&&left===0&&availPkgs().every(function(p){return o[p.title]==='booked'});
+      if(off){cls=past?'past':'past out';lab='';say=past?'past date':'outside the booking dates'}
+      else if(blocked){cls='unavailable';lab='N/A';say='not available'}
+      else if(left===0){cls='booked';lab=allBooked?'Booked':'Full';say='fully booked, 0 packages left'}
+      else {cls='open '+(left>=N?'l3':left===1?'l1':'l2');lab=left+' left';say=left+' of '+N+' packages left'; openDays++}
+      if(!off&&!blocked&&left>0&&cp&&!o[cp.title]&&pcap(cp)>1){var sl=pseats(cp,k); lab=sl+' left'; say=sl+' of '+pcap(cp)+' '+cp.title+' sets left'; cls='open '+(sl>=pcap(cp)?'l3':sl===1?'l1':'l2')}
+      if(mine) {cls+=' mine'; say+='. '+cp.title+' is taken'}
+      if(!off&&!blocked&&left>0&&(cp?specialFor(cp,k):CONFIG.packages.some(function(x){return specialFor(x,k)}))){cls+=' sp'; say+=', special rate'}
+      if(dt.getTime()===today.getTime()) cls+=' today';
+      var label=dt.toLocaleDateString('en-PH',{weekday:'long',month:'long',day:'numeric'})+', '+say;
+      cells.push(h('button',{type:'button',class:'day '+cls,disabled:off,'aria-label':label,'aria-pressed':sel.date===k?'true':'false',onclick:function(){
+        var s=stateFor(k);
+        if(s){showTaken(k,s);return}
+        if(left===0){showTaken(k,'booked');return}
+        pick(k);
+      }},h('span',{class:'dn'},String(d)),h('span',{class:'ds'},lab)));
+    })(d);
+  }
+  calBox.replaceChildren(
+    daysState==='failed' ? h('p',{class:'note'},'We could not load the booked dates right now. You can still send a request and we will check the date for you.') : '',
+    h('p',{class:'hint',style:'margin:0 0 .6rem'},cp?'Your package: '+cp.title+'. A red dashed outline means it is taken that day.':tx('calNote')),
+    (winMin()>0||winMax()!=null)?h('p',{class:'hint',style:'margin:0 0 .6rem'},'Online booking is open for '+shortDate(key(openFrom()))+(openTo()?' to '+shortDate(key(openTo())):' onwards')+'.'):'',
+    h('div',{class:'cal-head'},
+      h('button',{type:'button',class:'nav','aria-label':'Previous month',disabled:!canPrev,onclick:function(){view=new Date(y,m-1,1);renderCal()}},'‹'),
+      h('strong',{},MONTHS[m]+' '+y),
+      h('button',{type:'button',class:'nav','aria-label':'Next month',disabled:!canNext,onclick:function(){view=new Date(y,m+1,1);renderCal()}},'›')),
+    h('div',{class:'legend'},
+      h('span',{},h('i',{class:'sw l3'}),'Available'),
+      h('span',{},h('i',{class:'sw booked'}),'Fully booked'),
+      h('span',{},h('i',{class:'sw na'}),'Not available'),
+      cp?h('span',{},h('i',{class:'sw mine'}),'Your package is taken'):null,
+      SPECIAL.length?h('span',{},h('i',{class:'sw sp'}),'Special rate'):null),
+    h('div',{class:'grid',style:'margin-top:.7rem'},cells),
+    daysState==='loading' ? h('p',{class:'hint'},'Loading available dates...') :
+    (sel.date ? h('p',{class:'chosen'},longDate(sel.date)+((cp&&specialFor(cp,sel.date))?' · '+specialFor(cp,sel.date).label+': '+peso(specialFor(cp,sel.date).price):'')) : h('p',{class:'hint'},openDays+' '+(openDays===1?'date has':'dates have')+' openings in '+MONTHS[m]+'. Tap a green date to choose it.'))
+  );
+}
+
+/* ---------- form (built once so typing never loses focus) ---------- */
+var fName=h('input',{type:'text',id:'f-name',autocomplete:'name',required:true,'aria-describedby':'e-name',oninput:function(e){sel.name=e.target.value;clearErr('name',e.target)}});
+var fPhone=h('input',{type:'tel',id:'f-phone',autocomplete:'tel',inputmode:'numeric',maxlength:'13',pattern:'[0-9 ]*',required:true,'aria-describedby':'e-phone',oninput:function(e){e.target.value=fmtPhone(e.target.value);sel.phone=e.target.value;clearErr('phone',e.target)}});
+var fVenue=h('input',{type:'text',id:'f-venue',placeholder:'Street, barangay, city, or hall name',required:true,'aria-describedby':'e-venue',oninput:function(e){sel.venue=e.target.value;clearErr('venue',e.target)}});
+var fLandmark=h('input',{type:'text',id:'f-landmark',placeholder:'Nearby landmark, like beside the barangay hall',oninput:function(e){sel.landmark=e.target.value;renderSummary()}});
+var fPay=h('select',{id:'f-pay',required:true,'aria-describedby':'e-pay',onchange:function(e){sel.pay=e.target.value;clearErr('pay',e.target)}});
+function renderPayOptions(){   // the choices come from the Settings sheet (Payment methods)
+  var list=cfg('payMethods','GCash, Maya, Bank Transfer, Cash').split(',').map(function(s){return s.trim()}).filter(Boolean);
+  if(!list.length) list=['GCash'];
+  if(sel.pay&&list.indexOf(sel.pay)<0) sel.pay='';
+  fPay.replaceChildren.apply(fPay,[h('option',{value:''},'Select payment method')].concat(list.map(function(x){return h('option',{value:x,selected:x===sel.pay},x)})));
+}
+renderPayOptions();
+var times=[];for(var t=8;t<=21;t++){var hh=t>12?t-12:t;times.push(hh+':00 '+(t<12?'AM':'PM'))}
+var fTime=h('select',{id:'f-time',onchange:function(e){sel.time=e.target.value;renderSummary()}},times.map(function(x){return h('option',{value:x,selected:x===sel.time},x)}));
+var fHours=h('select',{id:'f-hours',onchange:function(e){sel.hours=e.target.value;renderSummary()}},['3','4','5','6','8','10','12','16','22'].map(function(x){return h('option',{value:x,selected:x===sel.hours},x+' hours')}));
+var fDelivery=h('input',{type:'checkbox',id:'f-delivery',checked:true,onchange:function(e){sel.delivery=e.target.checked;renderSummary()}});
+var fNotes=h('textarea',{id:'f-notes',placeholder:'Number of guests, anything we should know',oninput:function(e){sel.notes=e.target.value}});
+var fHp=h('input',{type:'text',id:'f-website',tabindex:'-1',autocomplete:'off','aria-hidden':'true',oninput:function(e){sel.website=e.target.value}});
+var eName=h('span',{class:'err',id:'e-name'}), ePhone=h('span',{class:'err',id:'e-phone'}), eVenue=h('span',{class:'err',id:'e-venue'}), eEvents=h('span',{class:'err',id:'e-events',role:'alert'}), ePay=h('span',{class:'err',id:'e-pay'});
+var errEls={name:eName,phone:ePhone,venue:eVenue,events:eEvents,pay:ePay}, inEls={name:fName,phone:fPhone,venue:fVenue,pay:fPay};
+function reqLab(t){return h('span',{},t,h('span',{class:'req','aria-hidden':'true'},' *'))}   // red star for required fields
+var evBox=h('fieldset',{class:'events wide'},h('legend',{},reqLab('Type of event (tick all that apply)')),
+  h('div',{class:'opts'},(CONFIG.events||[]).map(function(n){
+    return h('label',{class:'check chip-check'},h('input',{type:'checkbox',value:n,onchange:function(e){
+      var i=sel.events.indexOf(n); if(e.target.checked){if(i<0)sel.events.push(n)}else if(i>=0)sel.events.splice(i,1); clearErr('events',evBox);
+    }}),n)})),eEvents);
+inEls.events=evBox;
+var summaryBox=h('dl',{class:'summary'});
+var submitBtn=h('button',{type:'submit',class:'btn',id:'send'},FALLBACK.sendBtn);
+var reqTitleEl=h('h3',{style:'font-family:var(--font-display);margin:1.1rem 0 .5rem;font-size:1.05rem'},FALLBACK.reqTitle);
+var locNoteEl=h('p',{class:'hint'},FALLBACK.locNote.replace('{name}',CONFIG.name));
+var statusEl=h('p',{class:'status',role:'status','aria-live':'polite'});
+var extraBox=h('div',{class:'actions'});
+
+function clearErr(k,input){ delete errors[k]; errEls[k].textContent=''; input.removeAttribute('aria-invalid'); renderSummary(); }
+function setErr(k,msg){ errors[k]=msg; errEls[k].textContent=msg; inEls[k].setAttribute('aria-invalid','true'); }
+
+var form=h('form',{novalidate:true,id:'bookform',onsubmit:onSubmit},
+  h('div',{class:'fields'},
+    h('label',{for:'f-name'},reqLab('Your name'),fName,eName),
+    h('label',{for:'f-phone'},reqLab('Mobile number'),fPhone,ePhone),
+    h('label',{class:'wide',for:'f-venue'},reqLab('Event venue address'),fVenue,eVenue),
+    h('label',{class:'wide',for:'f-landmark'},'Landmark (optional)',fLandmark),
+    h('label',{for:'f-time'},'Start time',fTime),
+    h('label',{for:'f-hours'},'Hours needed',fHours),
+    h('label',{class:'check wide',for:'f-delivery'},fDelivery,'I need delivery and setup'),
+    h('label',{class:'wide',for:'f-pay'},reqLab('Payment method'),fPay,ePay),
+    evBox,h('label',{class:'wide',for:'f-notes'},'Notes (optional)',fNotes),
+    h('div',{class:'hp','aria-hidden':'true'},h('label',{for:'f-website'},'Leave this empty',fHp))),
+  reqTitleEl,
+  summaryBox,
+  pausedEl,
+  h('div',{class:'actions'},submitBtn),
+  locNoteEl,
+  statusEl,
+  extraBox);
+var doneBox=h('div',{id:'donebox',hidden:true});
+formBox.append(form,doneBox);
+
+function renderSummary(){
+  if(addonDate!==(sel.date||'')){ renderAddons(); renderPkgs(); }   // the chosen date changed: show what is left for that date
+  var p=pkgById(sel.pkg);
+  function row(a,b){return [h('dt',{},a),h('dd',{},b)]}
+  summaryBox.replaceChildren.apply(summaryBox,[].concat(
+    row('Package',p?p.title+' ('+peso(priceOf(p))+' '+priceTag(p)+')':'Not chosen yet'),
+    chosenAddons().length?row('Add-ons',chosenAddons().map(function(x){return addonLabel(x)+' ('+peso(num(x.price)*x.q)+')'}).join(', ')):[],
+    row('Date',sel.date?longDate(sel.date):'Not chosen yet'),
+    sel.landmark.trim()?row('Landmark',sel.landmark.trim()):[],
+    row('Time',sel.time+' for '+sel.hours+' hours'),
+    row('Delivery',sel.delivery?'Delivery and setup':'I will pick up'),
+    sel.pay?row('Payment method',sel.pay):[],
+    sel.events.length?row('Event',sel.events.join(', ')):[],
+    p?row('Total rental fee',peso(totalFee())+' (reservation fee included)'):[]
+  ));
+}
+
+function validate(){
+  errors={};
+  ['name','phone','venue','events','pay'].forEach(function(k){errEls[k].textContent='';inEls[k].removeAttribute('aria-invalid')});
+  pkgErr.textContent=''; calErr.textContent='';
+  var first=null;
+  if(!sel.pkg){pkgErr.textContent='Please choose a package.'; first=first||pkgBox.querySelector('button')}
+  if(!sel.date){calErr.textContent='Please choose a date.'; first=first||calBox.querySelector('.day:not(:disabled)')}
+  if(sel.pkg&&sel.date){   // the chosen package may have been taken since the date was picked
+    var taken=stateFor(sel.date);
+    if(taken){var lostDate=sel.date; sel.date=null; renderCal(); renderSummary(); showTaken(lostDate,taken); return false}
+  }
+  if(sel.name.trim().length<2){setErr('name','Your name is required. Please enter your name.'); first=first||fName}
+  if(!phoneOk(sel.phone)){setErr('phone',sel.phone.trim()?'Enter your 11-digit mobile number, like 0995 252 5426.':'Please enter your mobile number.'); first=first||fPhone}
+  if(!sel.venue.trim()){setErr('venue','Please enter the event venue address.'); first=first||fVenue}
+  if(!sel.pay){setErr('pay','Please select a payment method.'); first=first||fPay}
+  if(!sel.events.length){setErr('events','Please tick at least one type of event.'); first=first||evBox.querySelector('input')}
+  if(first){first.focus(); first.scrollIntoView({block:'center',behavior:'smooth'}); return false}
+  return true;
+}
+
+function messageText(){
+  var p=pkgById(sel.pkg);
+  var lines=['Hi! I would like to book:',
+    '• Package: '+(p?p.title:''),
+    '• Date: '+longDate(sel.date),
+    '• Start: '+sel.time+' for '+sel.hours+' hours',
+    '• Venue: '+sel.venue.trim(),
+    (sel.landmark.trim()?'• Landmark: '+sel.landmark.trim():null),
+    (sel.loc?'• My location: https://www.google.com/maps?q='+sel.loc.lat+','+sel.loc.lng:null),
+    (sel.pay?'• Payment method: '+sel.pay:null),
+    '• Event type: '+(sel.events.join(', ')||'Not specified'),
+    '• Add-ons: '+(chosenAddons().map(addonLabel).join(', ')||'None'),
+    '• Total rental fee: '+peso(totalFee())+' (reservation fee included)',
+    '• Delivery and setup: '+(sel.delivery?'Yes':'No, I will pick up'),
+    '• Name: '+sel.name.trim(),
+    '• Mobile: '+sel.phone.trim()];
+  if(sel.notes.trim()) lines.push('• Notes: '+sel.notes.trim());
+  lines.push('Is this date still available? Thank you!');
+  return lines.filter(Boolean).join('\n');
+}
+
+// Asks the phone for its position (the browser shows its own permission prompt). Never blocks sending: any problem gives null.
+function getLocation(){
+  return new Promise(function(resolve){
+    if(!navigator.geolocation){resolve(null);return}
+    submitBtn.textContent='Getting location...';
+    navigator.geolocation.getCurrentPosition(function(pos){
+      submitBtn.textContent='Sending...';
+      resolve({lat:pos.coords.latitude,lng:pos.coords.longitude,acc:Math.round(pos.coords.accuracy)});
+    },function(){submitBtn.textContent='Sending...';resolve(null)},{enableHighAccuracy:true,timeout:8000,maximumAge:60000});
+  });
+}
+
+function setStatus(msg,bad){ statusEl.textContent=msg||''; statusEl.className='status'+(bad?' bad':''); }
+
+function showMessengerFallback(){
+  var mn=messengerName();
+  var btns=[];
+  btns.push(h('button',{type:'button',class:'btn alt',onclick:function(e){
+    var b=e.currentTarget;
+    (navigator.clipboard?navigator.clipboard.writeText(messageText()):Promise.reject()).then(function(){b.textContent='Copied!'},function(){
+      window.prompt('Copy this message:',messageText());
+    });
+  }},'Copy message'));
+  if(mn) btns.push(h('a',{class:'btn alt',href:'https://m.me/'+encodeURIComponent(mn),target:'_blank',rel:'noopener'},'Open Messenger'));
+  extraBox.replaceChildren.apply(extraBox,btns);
+}
+
+function onSubmit(ev){
+  ev.preventDefault();
+  if(sending||!flag('acceptRequests')) return;
+  if(!validate()) return;
+  if(!CONFIG.scriptUrl){
+    setStatus('Online sending is not set up yet. Copy your message and send it on Messenger instead.',true);
+    showMessengerFallback(); return;
+  }
+  sending=true; submitBtn.disabled=true; submitBtn.textContent='Sending...'; setStatus('');
+  var p=pkgById(sel.pkg);
+  var payload={pkg:p.title,price:peso(priceOf(p)),date:sel.date,time:sel.time,hours:sel.hours,venue:sel.venue.trim(),
+    delivery:sel.delivery,events:sel.events.join(', '),addons:chosenAddons().map(addonLabel).join(', '),addonQty:chosenAddons().reduce(function(o,x){o[x.title]=x.q;return o},{}),total:peso(totalFee()),landmark:sel.landmark.trim(),payMethod:sel.pay,name:sel.name.trim(),phone:sel.phone.trim(),notes:sel.notes.trim(),website:sel.website};
+  var ctl=new AbortController(), timer;
+  getLocation().then(function(loc){
+    if(loc){payload.lat=loc.lat;payload.lng=loc.lng;payload.acc=loc.acc;sel.loc=loc}
+    timer=setTimeout(function(){ctl.abort()},20000);
+    return fetch(CONFIG.scriptUrl,{method:'POST',body:JSON.stringify(payload),signal:ctl.signal});   // no custom headers: avoids a CORS preflight
+  })
+    .then(function(r){return r.json()})
+    .then(function(res){
+      if(res && res.ok){ showDone(); loadDays(true); }
+      else if(res && res.error==='taken'){
+        var tk=sel.date; sel.date=null; loadDays(true); renderSummary(); showDlg('Sorry, that date was just taken',longDate(tk)+' was requested by someone else a moment ago.',tk);
+        setStatus('Sorry, that date was just taken. Please choose another date.',true);
+        calErr.textContent='Please choose another date.';
+        calBox.scrollIntoView({behavior:'smooth',block:'start'});
+      } else if(res && res.error==='addon'){
+        loadDays(true);
+        setStatus('Sorry, '+(res.item||'an add-on')+' was just booked by someone else for that date. Please check the add-ons again and resend.',true);
+        addonBox.scrollIntoView({behavior:'smooth',block:'start'});
+      } else if(res && res.error==='price'){
+        loadDays(true);
+        setStatus('The price for that date was just updated. Please check your total and send again.',true);
+      } else if(res && res.error==='closed'){
+        var cd=sel.date; sel.date=null; loadDays(true); renderCal(); renderSummary();
+        setStatus('Sorry, '+longDate(cd)+' is not open for online booking. Please choose another date.',true);
+        calErr.textContent='Please choose another date.';
+        calBox.scrollIntoView({behavior:'smooth',block:'start'});
+      } else { throw new Error('bad') }
+    })
+    .catch(function(){
+      setStatus('We could not send your request. Check your internet and try again, or copy your message and send it on Messenger.',true);
+      showMessengerFallback();
+    })
+    .then(function(){ clearTimeout(timer); sending=false; submitBtn.disabled=!flag('acceptRequests'); submitBtn.textContent=tx('sendBtn'); });
+}
+
+function showDone(){
+  sentOk=true;
+  var pp=pkgById(sel.pkg), tot=totalFee(), amt=num(CONFIG.reservationFee)||tot;
+  var payBlock=h('p',{},h('strong',{},'Total rental fee: '+peso(tot)),'. The reservation fee is included in it.');
+  var phone=null;
+  var again=h('button',{type:'button',class:'btn alt',style:'margin-top:.8rem',onclick:function(){
+    sentOk=false; doneBox.hidden=true; form.hidden=false;
+    sel.pkg=null; sel.date=null; sel.notes=''; fNotes.value=''; setStatus(''); extraBox.replaceChildren();
+    renderPkgs(); renderCal(); renderSummary(); window.scrollTo({top:0,behavior:'smooth'});
+  }},'Send another request');
+  doneBox.replaceChildren(h('div',{class:'done',role:'status'},
+    h('h3',{},tx('doneTitle')),
+    h('p',{},tx('doneMsg').replace('{customer}',sel.name.trim()).replace('{phone}',sel.phone.trim()).replace('{date}',longDate(sel.date))),
+    tx('doneNote')?h('p',{},tx('doneNote')):null,
+    tx('doneShot')?h('p',{},h('strong',{},tx('doneShot'))):null,
+    payBlock,phone,
+    msgrSendBtn()?h('div',{class:'contacts'},msgrSendBtn()):null,
+    msgrSendBtn()?h('p',{class:'hint'},'Tap the Messenger button. Your booking details'+(sel.loc?' and map location are':' are')+' copied. Just paste and send.'):null,
+    contactRow()),again);
+  form.hidden=true; doneBox.hidden=false; doneBox.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+/* ---------- load booked dates from the Google Sheet ---------- */
+var ver='', lastSig='';
+function applyData(res){
+  applyText(res.settings); renderPayOptions();
+  var sig=JSON.stringify([res.packages,res.addons,res.settings,res.used,res.pused,res.special,res.off]); if(sig===lastSig) return; lastSig=sig;
+  var ICONS=['🎤','🔊','🎉'], selT=(pkgById(sel.pkg)||{}).title, adQ={}; chosenAddons().forEach(function(x){adQ[x.title]=x.q});
+  if(res.packages&&res.packages.length) CONFIG.packages=res.packages.map(function(p,i){p.id=slug(p.title);p.icon=ICONS[i%3];return p});
+  if(res.addons) CONFIG.addons=res.addons.map(function(x){x.id=slug(x.title);return x});
+  SPECIAL=res.special||[];
+  if(sel.date&&!inWindow(fromKey(sel.date))) sel.date=null;   // the booking window changed and the chosen date fell outside it
+  var np=CONFIG.packages.filter(function(p){return p.title===selT})[0]; sel.pkg=(np&&np.available!==false)?np.id:null;
+  sel.addons={}; (CONFIG.addons||[]).forEach(function(x){ if(x.available&&adQ[x.title]) sel.addons[x.id]=Math.min(adQ[x.title],maxQty(x)); });
+  renderPkgs(); renderAddons(); renderCal(); renderSummary(); renderRem(); renderPay();
+}
+function loadDays(quiet){
+  if(!CONFIG.scriptUrl){ daysState='ok'; renderCal(); return; }
+  if(!quiet){ daysState='loading'; renderCal(); }
+  fetch(CONFIG.scriptUrl+'?t='+Date.now(),{cache:'no-store'})   // the time stamp keeps phones and networks from showing old dates
+    .then(function(r){return r.json()})
+    .then(function(res){
+      if(!res||!res.ok) throw new Error('bad');
+      DAYS=res.days||{}; USED=res.used||{}; PUSED=res.pused||{}; OFF=res.off||{}; ver=res.v||''; daysState='ok'; applyData(res);
+      var lost=(sel.date && stateFor(sel.date))?sel.date:null;
+      if(lost) sel.date=null;
+      renderCal(); renderSummary();
+      if(lost && quiet && !sentOk) showDlg('Your date is no longer open',longDate(lost)+' was just taken. Please pick another date.',lost);
+    })
+    .catch(function(){ if(!quiet){ daysState='failed'; renderCal(); } });
+}
+// Quick check for changes (catches Accepted / Hold edits in the sheet), plus a full reload every few minutes.
+var checking=false;
+function check(){
+  if(!CONFIG.scriptUrl||document.hidden||checking) return;
+  checking=true;
+  fetch(CONFIG.scriptUrl+'?check=1&t='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()})
+    .then(function(res){ if(res&&res.ok&&res.v!==ver) loadDays(true); }).catch(function(){})
+    .then(function(){ checking=false; });
+}
+setInterval(check,Math.max(3,CONFIG.checkSeconds||5)*1000);
+setInterval(function(){ if(!document.hidden) loadDays(true); },(CONFIG.refreshMinutes||5)*60000);
+document.addEventListener('visibilitychange',check);
+// Reload the whole page every few minutes, but only when nobody is in the middle of a request.
+function idle(){
+  return !sending&&!sentOk&&!dlg.open&&!sel.pkg&&!sel.date&&!sel.name&&!sel.phone&&!sel.venue&&!sel.notes&&!sel.events.length&&!Object.keys(sel.addons).length;
+}
+setInterval(function(){ if(idle()) location.reload(); },(CONFIG.reloadMinutes||10)*60000);
+
+applyText(null); renderPkgs(); renderAddons(); renderSummary(); renderRem(); renderPay(); loadDays();
+formBox.append(callEl);
+})();
