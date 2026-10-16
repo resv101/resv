@@ -18,6 +18,11 @@
  *   Declined -> the date is freed (if nothing else uses it), and a reply message is written
  *   New      -> the date is freed (if nothing else uses it), and the reply is cleared
  *
+ *   "Monitoring"          -> one row per date: how many of each package / add-on are REMAINING and how many are BOOKED.
+ *                            Rebuilt automatically. Do not type in it.
+ *   "Transaction History" -> one row per ACCEPTED request. You type the Payment Received (partial or full);
+ *                            Balance and Status (Success / Remaining Bal.) are automatic.
+ *
  * Run setup() once from the editor (and again after pasting a new version).
  */
 
@@ -35,10 +40,14 @@ const ADDONS_SHEET = 'Add-ons';
 const SETTINGS_SHEET = 'Settings';
 const SPECIAL_SHEET = 'Special Prices';
 const AVAIL_SHEET = 'Availability by Date';
+const MONITOR_SHEET = 'Monitoring';
+const TX_SHEET = 'Transaction History';
 const SITE_TZ = 'Asia/Manila'; // used to decide what "today" is for the booking window
 
 // Requests columns (1-based)
-const C = { RECEIVED: 1, STATUS: 2, NAME: 3, PHONE: 4, PKG: 5, PRICE: 6, DATE: 7, TIME: 8, HOURS: 9, VENUE: 10, DELIVERY: 11, NOTES: 12, REPLY: 13, SMS: 14, EVENT: 15, ADDONS: 16, TOTAL: 17, LOC: 18 };
+const C = { RECEIVED: 1, STATUS: 2, NAME: 3, PHONE: 4, PKG: 5, PRICE: 6, DATE: 7, TIME: 8, HOURS: 9, VENUE: 10, DELIVERY: 11, NOTES: 12, REPLY: 13, SMS: 14, EVENT: 15, ADDONS: 16, TOTAL: 17, LOC: 18, ID: 19, PAY: 23 };
+// Extra Requests headers (columns S to W). Existing headers in those columns are never overwritten.
+const EXTRA_HEADS = ['Request ID (auto, do not edit)', 'Tap to WhatsApp', 'Messenger ID (auto)', 'Messenger message (auto)', 'Payment method (customer)'];
 
 function setup() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -46,6 +55,7 @@ function setup() {
   setupSpecial(ss); // the Special Prices sheet (holiday or date-specific rates)
   setupAvailability(ss); // the Availability by Date sheet (turn packages / add-ons off on certain dates)
   setupSettings(ss); // the Settings sheet (header text)
+  setupTransactions(ss); // the Transaction History sheet (payments)
 
   let d = ss.getSheetByName(DATES_SHEET);
   if (!d) d = ss.insertSheet(DATES_SHEET);
@@ -58,12 +68,17 @@ function setup() {
   let r = ss.getSheetByName(REQUESTS_SHEET);
   if (!r) r = ss.insertSheet(REQUESTS_SHEET);
   r.getRange(1, 1, 1, 18).setValues([['Received', 'Status', 'Name', 'Mobile', 'Package', 'Price', 'Event date', 'Start', 'Hours', 'Venue', 'Delivery', 'Notes', 'Reply to send', 'Tap to text', 'Event type', 'Add-ons', 'Total', 'Location (map link)']]);
+  EXTRA_HEADS.forEach(function (t, i) { const cell = r.getRange(1, C.ID + i); if (!String(cell.getValue()).trim()) cell.setValue(t); });
   r.getRange('G:H').setNumberFormat('@'); // Event date + Start stay plain text so Sheets does not turn "8:00 AM" into a time value
   r.setFrozenRows(1);
   const rule = SpreadsheetApp.newDataValidation().requireValueInList(STATUSES, true).setAllowInvalid(false).build();
   r.getRange(2, C.STATUS, 1000, 1).setDataValidation(rule);
   r.setColumnWidth(C.REPLY, 380);
   clearCache();
+  rebuildMonitoring(); // the Monitoring sheet (remaining / booked per date)
+  // Keep the Monitoring sheet's dates current every night (one trigger only)
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'rebuildMonitoring') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('rebuildMonitoring').timeBased().everyDays(1).atHour(0).inTimezone(SITE_TZ).create();
 }
 
 /* ---------------- website: load dates ---------------- */
@@ -77,16 +92,9 @@ function doGet(e) {
   let payload = null;
   try { const hit = cache.get(CACHE_KEY); if (hit) payload = JSON.parse(hit); } catch (err) {}
   if (!payload) {
-    const days = getDays(), packages = getPackages(), addons = getAddons(), settings = getSettings(), used = getAddonUse(addons), pused = getPackageUse(), special = getSpecialPrices();
-    // Availability by Date: a package set to No becomes "unavailable" for that package on that date; add-ons set to No go in "off"
-    const avail = getAvailability(), addonTitles = (addons || []).map(function (x) { return x.title; }), off = {};
-    Object.keys(avail).forEach(function (d) {
-      Object.keys(avail[d]).forEach(function (t) {
-        if (addonTitles.indexOf(t) > -1) { off[d] = off[d] || {}; off[d][t] = 1; }
-        else { days[d] = days[d] || {}; if (!days[d]['*'] && !days[d][t]) days[d][t] = 'unavailable'; }
-      });
-    });
-    payload = { ok: true, days: days, packages: packages, addons: addons, settings: settings, used: used, pused: pused, special: special, off: off, v: hash(JSON.stringify([days, packages, addons, settings, used, pused, special, off])) };
+    const st = loadState(), settings = getSettings(), special = getSpecialPrices();
+    payload = { ok: true, days: st.days, packages: st.packages, addons: st.addons, settings: settings, used: st.used, pused: st.pused, special: special, off: st.off };
+    payload.v = hash(JSON.stringify(payload));
     try { cache.put(CACHE_KEY, JSON.stringify(payload), CACHE_SECONDS); } catch (err) {}
   }
   if (e && e.parameter && e.parameter.check) return json({ ok: true, v: payload.v }); // cheap "did anything change?" check
@@ -162,6 +170,7 @@ const SETTINGS_ROWS = [
   ['rem4', 'Reminder 4', '', 'Optional extra reminder line.'],
   ['rem5', 'Reminder 5', '', 'Optional extra reminder line.'],
   ['phone', 'Phone number (call or text)', '0999 711 4240', 'Shown to customers as "You can also call or text". Change it here when your number changes. Type - to hide.'],
+  ['payMethods', 'Payment methods (separate with commas)', 'GCash, Maya, Bank Transfer, Cash', 'The choices in the customer\'s Payment method list and in the Transaction History dropdown.'],
   ['whatsapp', 'WhatsApp number', '09997114240', 'Number for the WhatsApp button. Change it here if you get a new number. Blank = no button.'],
   ['viber', 'Viber number', '09997114240', 'Number for the Viber button. Blank = no button.'],
   ['messenger', 'Messenger page ID or username', '1368190183045322', 'Your Facebook page ID or username for the Messenger button. Blank = no button.'],
@@ -229,6 +238,13 @@ function getSettings() {
     if (k) out[k] = String(r[1] == null ? '' : r[1]).trim();
   });
   return out;
+}
+
+// The reminder lines (Settings sheet, Reminder 2 to 5) are reused in the confirmation reply, so you only edit them once.
+function reminderText() {
+  const s = getSettings();
+  if (!s) return REMINDER;
+  return ['rem2', 'rem3', 'rem4', 'rem5'].map(function (k) { return String(s[k] || '').trim(); }).filter(function (x) { return x && x !== '-'; }).join(' ');
 }
 
 function money(v) {
@@ -404,8 +420,8 @@ function getPackageUse() {
 }
 
 // How many of a package can be booked on one date (the Quantity column on the Packages sheet; 1 if blank or not found).
-function packageCap(title) {
-  const list = getPackages() || [];
+function packageCap(title, list) {
+  list = list || getPackages() || [];
   const m = list.filter(function (x) { return x.title === title; })[0];
   return m ? m.qty : 1;
 }
@@ -427,6 +443,23 @@ function getDays() {
   }
   return days;
 }
+
+// Everything about stock and blocked dates, read once. Used by the website and by the Monitoring sheet.
+function loadState() {
+  const days = getDays(), packages = getPackages(), addons = getAddons();
+  // Availability by Date: a package set to No becomes "unavailable" for that package on that date; add-ons set to No go in "off"
+  const avail = getAvailability(), addonTitles = (addons || []).map(function (x) { return x.title; }), off = {};
+  Object.keys(avail).forEach(function (d) {
+    Object.keys(avail[d]).forEach(function (t) {
+      if (addonTitles.indexOf(t) > -1) { off[d] = off[d] || {}; off[d][t] = 1; }
+      else { days[d] = days[d] || {}; if (!days[d]['*'] && !days[d][t]) days[d][t] = 'unavailable'; }
+    });
+  });
+  return { days: days, packages: packages, addons: addons, off: off, used: getAddonUse(addons), pused: getPackageUse() };
+}
+
+// 'YYYY-MM-DD' for today + n days in the business time zone
+function dayKey(n) { const d = new Date(); d.setDate(d.getDate() + n); return Utilities.formatDate(d, SITE_TZ, 'yyyy-MM-dd'); }
 
 function hash(s) {
   let h = 0;
@@ -450,12 +483,12 @@ function doPost(e) {
 
     // Booking window (Settings sheet): refuse dates that are too soon or too far ahead
     const cfgS = getSettings() || {};
-    const dayKey = function (n) { const d = new Date(); d.setDate(d.getDate() + n); return Utilities.formatDate(d, SITE_TZ, 'yyyy-MM-dd'); };
     const minD = Math.max(0, parseInt(cfgS.minDays, 10) || 0), maxD = parseInt(cfgS.maxDays, 10);
     if (date < dayKey(minD) || (!isNaN(maxD) && maxD >= 0 && date > dayKey(maxD))) return json({ ok: false, error: 'closed' });
 
     // Price check: refuse if the price the customer saw is no longer the right price for that date
-    const pkRow = (getPackages() || []).filter(function (x) { return x.title === clean(p.pkg); })[0];
+    const pkgList = getPackages() || [];
+    const pkRow = pkgList.filter(function (x) { return x.title === clean(p.pkg); })[0];
     if (pkRow) {
       const base = Number(String(pkRow.price).replace(/[^\d]/g, '')) || 0;
       const sp = specialFor(getSpecialPrices(), pkRow.title, date);
@@ -483,7 +516,7 @@ function doPost(e) {
 
     // Package stock: refuse if every set of this package is already taken for this date
     const pkgUse = (getPackageUse()[date] || {})[clean(p.pkg)] || 0;
-    if (pkgUse >= packageCap(clean(p.pkg))) return json({ ok: false, error: 'taken' });
+    if (pkgUse >= packageCap(clean(p.pkg), pkgList)) return json({ ok: false, error: 'taken' });
 
     // Add-on stock: refuse if someone already took the last ones for this date
     if (p.addonQty && typeof p.addonQty === 'object') {
@@ -506,8 +539,9 @@ function doPost(e) {
     const rSheet = ss.getSheetByName(REQUESTS_SHEET);
     rSheet.appendRow([
       new Date(), 'New', name, phone, clean(p.pkg), clean(p.price),
-      date, clean(p.time), clean(p.hours), clean(p.venue),
-      p.delivery ? 'Yes' : 'No (pickup)', clean(p.notes), '', '', clean(p.events), clean(p.addons), clean(p.total), loc
+      date, clean(p.time), clean(p.hours), clean(p.venue) + (clean(p.landmark) ? ' (Landmark: ' + clean(p.landmark) + ')' : ''),
+      p.delivery ? 'Yes' : 'No (pickup)', clean(p.notes), '', '', clean(p.events), clean(p.addons), clean(p.total), loc,
+      newId(), '', '', '', clean(p.payMethod)
     ]);
 
     if (NOTIFY_EMAIL) {
@@ -517,7 +551,7 @@ function doPost(e) {
         'Name: ' + name + '\nMobile: ' + phone + '\nPackage: ' + clean(p.pkg) +
         '\nDate: ' + date + '\nStart: ' + clean(p.time) + ' (' + clean(p.hours) + ' hours)' +
         '\nVenue: ' + clean(p.venue) + '\nDelivery: ' + (p.delivery ? 'Yes' : 'No') +
-        '\nEvent: ' + clean(p.events) + '\nAdd-ons: ' + clean(p.addons) + '\nTotal: ' + clean(p.total) + '\nLocation: ' + (loc || 'not shared') + '\nNotes: ' + clean(p.notes)
+        '\nPayment method: ' + clean(p.payMethod) + '\nEvent: ' + clean(p.events) + '\nAdd-ons: ' + clean(p.addons) + '\nTotal: ' + clean(p.total) + '\nLocation: ' + (loc || 'not shared') + '\nNotes: ' + clean(p.notes)
       );
     }
     return json({ ok: true });
@@ -530,31 +564,45 @@ function doPost(e) {
 
 /* ---------------- you change a Status: update calendar + write reply ---------------- */
 // Runs by itself whenever you edit the sheet (a "simple trigger", no setup needed).
+const STOCK_SHEETS = [PACKAGES_SHEET, ADDONS_SHEET, AVAIL_SHEET, DATES_SHEET, SETTINGS_SHEET];
 function onEdit(e) {
   if (!e || !e.range) return;
   clearCache(); // any edit in the spreadsheet: the website should see it on its next check
-  const sheet = e.range.getSheet();
-  if (sheet.getName() !== REQUESTS_SHEET) return;
+  const sheet = e.range.getSheet(), name = sheet.getName();
+  if (STOCK_SHEETS.indexOf(name) > -1) { rebuildMonitoring(); return; } // quantity / availability / booking window changed
+  if (name !== REQUESTS_SHEET) return;
   if (e.range.getColumn() > C.STATUS || e.range.getLastColumn() < C.STATUS) return;
 
   const ss = e.source;
   const first = Math.max(2, e.range.getRow());
   const last = e.range.getLastRow();
-  const dates = {};
+  const dates = {}, caps = capMap();
 
   for (let row = first; row <= last; row++) {
-    const v = sheet.getRange(row, 1, 1, 17).getValues()[0];
+    const v = sheet.getRange(row, 1, 1, C.PAY).getValues()[0];
     const date = normDate(v[C.DATE - 1]);
     if (!date) continue;
     dates[date] = true;
     writeReply(sheet, row, v, date);
+    syncTransaction(ss, sheet, row, v); // Accepted -> a line in Transaction History
   }
-  Object.keys(dates).forEach(function (d) { syncDate(ss, d); });
+  Object.keys(dates).forEach(function (d) { syncDate(ss, d, caps); });
+  rebuildMonitoring();
   clearCache();
 }
 
+function newId() { return Utilities.getUuid().slice(0, 8).toUpperCase(); }
+
+// { 'Package title': how many can be booked on one date }
+function capMap() {
+  const out = {};
+  (getPackages() || []).forEach(function (p) { out[p.title] = p.qty; });
+  return out;
+}
+
 // Work out the date's status from all requests, then update the "Dates" sheet.
-function syncDate(ss, date) {
+function syncDate(ss, date, caps) {
+  caps = caps || capMap();
   const rSheet = ss.getSheetByName(REQUESTS_SHEET);
   const want = {}; // package -> 'booked' | 'hold'
   const acc = {}, hld = {}; // package -> how many accepted / on hold for this date
@@ -572,7 +620,7 @@ function syncDate(ss, date) {
   // The date is only marked for a package once ALL its sets are taken (Quantity on the Packages sheet; 1 = as before)
   Object.keys(acc).concat(Object.keys(hld)).forEach(function (pk) {
     if (want[pk]) return;
-    const a = acc[pk] || 0, total = a + (hld[pk] || 0), cap = packageCap(pk);
+    const a = acc[pk] || 0, total = a + (hld[pk] || 0), cap = caps[pk] || 1;
     if (total >= cap) want[pk] = a >= cap ? 'booked' : 'hold';
   });
 
@@ -610,7 +658,9 @@ function rebuildDates() {
       if (d) seen[d] = true;
     });
   }
-  Object.keys(seen).forEach(function (d) { syncDate(ss, d); });
+  const caps = capMap();
+  Object.keys(seen).forEach(function (d) { syncDate(ss, d, caps); });
+  rebuildMonitoring();
   clearCache();
 }
 
@@ -627,7 +677,7 @@ function writeReply(sheet, row, v, date) {
       (v[C.TOTAL - 1] ? 'Total rental fee: ' + v[C.TOTAL - 1] + ' (reservation fee included)\n' : '') +
       'Date: ' + nice + ', ' + timeText(v[C.TIME - 1]) + ' for ' + v[C.HOURS - 1] + ' hours\n' +
       'Venue: ' + v[C.VENUE - 1] + '\n' +
-      REMINDER + '\n' +
+      (reminderText() ? reminderText() + '\n' : '') +
       'Thank you for choosing ' + BUSINESS + '!';
   } else if (status === 'hold') {
     msg = 'Hi ' + name + '! We are holding ' + nice + ' for you (' + v[C.PKG - 1] + '). ' +
@@ -649,6 +699,137 @@ function writeReply(sheet, row, v, date) {
   } else {
     smsCell.clearContent();
   }
+}
+
+/* ---------------- Monitoring sheet: remaining and booked, per date ---------------- */
+// One row per date. Left block = REMAINING, right block = BOOKED (accepted + on hold). Packages first, then add-ons.
+// Columns follow your Packages and Add-ons sheets, so a new package or add-on shows up by itself.
+function rebuildMonitoring() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(MONITOR_SHEET) || ss.insertSheet(MONITOR_SHEET);
+  const st = loadState(), pk = st.packages || [], ad = st.addons || [];
+  const n = pk.length + ad.length;
+  sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart();
+  sh.clear(); sh.clearConditionalFormatRules();
+  if (!n) { sh.getRange(1, 1).setValue('Add packages on the Packages sheet first.'); return; }
+
+  // dates: today up to the "Latest booking date" (60 days if blank), plus any later date that has bookings
+  const maxD = parseInt((getSettings() || {}).maxDays, 10), span = !isNaN(maxD) && maxD >= 0 ? maxD : 60;
+  const set = {}, today = dayKey(0);
+  for (let i = 0; i <= span; i++) set[dayKey(i)] = true;
+  Object.keys(st.pused).concat(Object.keys(st.used)).forEach(function (d) { if (d >= today) set[d] = true; });
+  const dates = Object.keys(set).sort();
+
+  const items = pk.map(function (p) { return { t: p.title, qty: p.qty, ok: p.available, pkg: true }; })
+    .concat(ad.map(function (a) { return { t: a.title, qty: a.qty, ok: a.available, pkg: false }; }));
+  const rows = dates.map(function (d) {
+    const day = st.days[d] || {}, off = st.off[d] || {}, rem = [], bk = [];
+    items.forEach(function (it) {
+      const used = ((it.pkg ? st.pused : st.used)[d] || {})[it.t] || 0;
+      const closed = !it.ok || day['*'] || (it.pkg ? day[it.t] : off[it.t]);
+      rem.push(closed ? 0 : Math.max(0, it.qty - used));
+      bk.push(used);
+    });
+    return [d].concat(rem, bk);
+  });
+  const total = ['TOTAL BOOKED'];
+  for (let i = 0; i < n; i++) total.push('');
+  for (let i = 0; i < n; i++) total.push(rows.reduce(function (s, r) { return s + r[1 + n + i]; }, 0));
+
+  const cols = 1 + 2 * n;
+  sh.getRange(1, 1, 1, cols).setValues([['Date'].concat(items.map(function (x, i) { return i === 0 ? 'REMAINING AVAILABLE' : ''; }), items.map(function (x, i) { return i === 0 ? 'BOOKED (accepted + on hold)' : ''; }))]);
+  sh.getRange(1, 2, 1, n).merge(); sh.getRange(1, 2 + n, 1, n).merge();
+  sh.getRange(2, 1, 1, cols).setValues([['Date (YYYY-MM-DD)'].concat(items.map(function (x) { return x.t; }), items.map(function (x) { return x.t; }))]);
+  sh.getRange(3, 1, 1, cols).setValues([total]);
+  sh.getRange(4, 1, rows.length, 1).setNumberFormat('@');
+  if (rows.length) sh.getRange(4, 1, rows.length, cols).setValues(rows);
+
+  sh.getRange(1, 1, 3, cols).setFontWeight('bold');
+  sh.getRange(1, 2, 1, n).setBackground('#d9ead3').setHorizontalAlignment('center');
+  sh.getRange(1, 2 + n, 1, n).setBackground('#fce5cd').setHorizontalAlignment('center');
+  sh.getRange(2, 2, 1, n).setBackground('#d9ead3'); sh.getRange(2, 2 + n, 1, n).setBackground('#fce5cd');
+  sh.getRange(2, 1, 1, cols).setWrap(true).setVerticalAlignment('middle');
+  sh.getRange(3, 1, 1, cols).setBackground('#efefef');
+  sh.getRange(1, 2, sh.getMaxRows(), cols - 1).setHorizontalAlignment('center');
+  sh.getRange(1, 2 + n, sh.getMaxRows(), 1).setBorder(null, true, null, null, null, null, '#999999', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+  sh.setFrozenRows(3); sh.setFrozenColumns(1);
+  sh.setColumnWidth(1, 150);
+  for (let c = 2; c <= cols; c++) sh.setColumnWidth(c, 110);
+  if (rows.length) {
+    sh.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule().whenNumberEqualTo(0).setBackground('#f4c7c3').setFontColor('#a61c00').setRanges([sh.getRange(4, 2, rows.length, n)]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenNumberGreaterThan(0).setBackground('#fff2cc').setRanges([sh.getRange(4, 2 + n, rows.length, n)]).build()
+    ]);
+  }
+  sh.getRange('A1').setNote('Automatic. Rebuilt whenever you change a request Status, Quantity, Availability or Settings. Do not type here.');
+}
+
+/* ---------------- Transaction History sheet: payments ---------------- */
+const TX_HEAD = ['Transaction date', 'Customer Name', 'Packages', 'Total Add-ons', 'Total Amount', 'Payment Received', 'Balance', 'Payment Method', 'Status', 'Request ID (auto)'];
+const TX = { DATE: 1, NAME: 2, PKG: 3, ADD: 4, TOTAL: 5, PAID: 6, BAL: 7, METHOD: 8, STATUS: 9, ID: 10 };
+
+function payMethodList() {
+  const raw = (getSettings() || {}).payMethods;
+  const list = String(raw == null || raw === '' ? 'GCash, Maya, Bank Transfer, Cash' : raw).split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+  return list.length ? list : ['GCash'];
+}
+
+function setupTransactions(ss) {
+  let tx = ss.getSheetByName(TX_SHEET);
+  if (!tx) tx = ss.insertSheet(TX_SHEET);
+  tx.getRange(1, 1, 1, TX_HEAD.length).setValues([TX_HEAD]).setFontWeight('bold').setBackground('#d9e2f3').setWrap(true);
+  tx.setFrozenRows(1);
+  tx.getRange('A:A').setNumberFormat('mmm d, yyyy, h:mm am/pm');
+  tx.getRange('D:G').setNumberFormat('#,##0');
+  [170, 160, 160, 100, 110, 120, 100, 140, 130, 120].forEach(function (w, i) { tx.setColumnWidth(i + 1, w); });
+  tx.getRange(2, TX.METHOD, 998, 1).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(payMethodList(), true).setAllowInvalid(true).build());
+  tx.getRange(2, TX.PAID, 998, 1).setBackground('#fff9e5'); // the cells you type in
+  tx.getRange('F1').setNote('You type this. Enter what the customer has paid so far (partial or full). Balance and Status update by themselves.');
+  tx.getRange('I1').setNote('Automatic: Success when the balance is zero, otherwise Remaining Bal.');
+  tx.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Success').setBackground('#d9ead3').setFontColor('#274e13').setRanges([tx.getRange(2, TX.STATUS, 998, 1)]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Remaining Bal.').setBackground('#fff2cc').setFontColor('#7f6000').setRanges([tx.getRange(2, TX.STATUS, 998, 1)]).build()
+  ]);
+  tx.hideColumns(TX.ID);
+}
+
+function amountOf(v) { return Number(String(v == null ? '' : v).replace(/[^\d.]/g, '')) || 0; }
+
+function findTxRow(tx, id) {
+  const n = tx.getLastRow() - 1;
+  if (n < 1) return 0;
+  const ids = tx.getRange(2, TX.ID, n, 1).getValues();
+  for (let i = 0; i < n; i++) if (String(ids[i][0]).trim() === id) return i + 2;
+  return 0;
+}
+
+// Called for each request whose Status was edited. Accepted -> one line (once). Anything else -> the line goes away if nothing was paid yet.
+function syncTransaction(ss, rSheet, row, v) {
+  const tx = ss.getSheetByName(TX_SHEET);
+  if (!tx) return;
+  const accepted = String(v[C.STATUS - 1]).trim().toLowerCase() === 'accepted';
+  let id = String(v[C.ID - 1] || '').trim();
+  if (!id) {
+    if (!accepted) return;
+    id = newId(); rSheet.getRange(row, C.ID).setValue(id); // older requests get their ID now
+  }
+  const found = findTxRow(tx, id);
+  if (!accepted) {
+    if (found && !(amountOf(tx.getRange(found, TX.PAID).getValue()) > 0)) tx.deleteRow(found);
+    return;
+  }
+  if (found) return; // already logged: keep what you typed
+  const total = amountOf(v[C.TOTAL - 1]) || amountOf(v[C.PRICE - 1]);
+  const addons = Math.max(0, total - amountOf(v[C.PRICE - 1]));
+  if (tx.getMaxRows() < 2) tx.insertRowAfter(1);
+  tx.insertRowBefore(2); // newest on top
+  const r = tx.getRange(2, 1, 1, TX_HEAD.length);
+  r.setFontWeight('normal').setFontColor(null).setBackground(null);
+  r.setValues([[v[C.RECEIVED - 1] instanceof Date ? v[C.RECEIVED - 1] : new Date(), String(v[C.NAME - 1]).trim(), String(v[C.PKG - 1]).trim(), addons, total, '',
+    '=IF(E2="","",E2-N(F2))', String(v[C.PAY - 1] || '').trim(),
+    '=IF(E2="","",IF(E2-N(F2)<=0,"Success","Remaining Bal."))', id]]);
+  tx.getRange(2, TX.PAID).setBackground('#fff9e5');
+  tx.getRange(2, TX.METHOD).setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(payMethodList(), true).setAllowInvalid(true).build());
 }
 
 /* ---------------- helpers ---------------- */
