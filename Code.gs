@@ -40,6 +40,7 @@ const ADDONS_SHEET = 'Add-ons';
 const SETTINGS_SHEET = 'Settings';
 const SPECIAL_SHEET = 'Special Prices';
 const AVAIL_SHEET = 'Availability by Date';
+const LOCATIONS_SHEET = 'Locations';
 const MONITOR_SHEET = 'Monitoring';
 const TX_SHEET = 'Transaction History';
 const SITE_TZ = 'Asia/Manila'; // used to decide what "today" is for the booking window
@@ -56,6 +57,7 @@ function setup() {
   setupAvailability(ss); // the Availability by Date sheet (turn packages / add-ons off on certain dates)
   setupSettings(ss); // the Settings sheet (header text)
   setupTransactions(ss); // the Transaction History sheet (payments)
+  setupLocations(ss); // the Locations sheet (city and barangay dropdowns)
 
   let d = ss.getSheetByName(DATES_SHEET);
   if (!d) d = ss.insertSheet(DATES_SHEET);
@@ -87,17 +89,34 @@ function setup() {
 const CACHE_KEY = 'site-payload', CACHE_SECONDS = 60;
 function clearCache() { try { CacheService.getScriptCache().remove(CACHE_KEY); } catch (err) {} }
 
+// { REQUEST_ID: 'accepted' | 'hold' | 'declined' | 'new' } for the ids a customer's device sends (a random 8-character code, up to 20)
+function statusOf(raw) {
+  const want = {}, out = {};
+  String(raw).split(',').slice(0, 20).forEach(function (x) { x = x.trim().toUpperCase(); if (/^[A-Z0-9]{4,12}$/.test(x)) want[x] = true; });
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REQUESTS_SHEET);
+  if (!sh || sh.getLastRow() < 2) return out;
+  sh.getRange(2, 1, sh.getLastRow() - 1, C.ID).getValues().forEach(function (r) {
+    const id = String(r[C.ID - 1]).trim().toUpperCase();
+    if (want[id]) out[id] = String(r[C.STATUS - 1]).trim().toLowerCase();
+  });
+  return out;
+}
+
 function doGet(e) {
   const cache = CacheService.getScriptCache();
   let payload = null;
   try { const hit = cache.get(CACHE_KEY); if (hit) payload = JSON.parse(hit); } catch (err) {}
   if (!payload) {
     const st = loadState(), settings = getSettings(), special = getSpecialPrices();
-    payload = { ok: true, days: st.days, packages: st.packages, addons: st.addons, settings: settings, used: st.used, pused: st.pused, special: special, off: st.off };
+    payload = { ok: true, days: st.days, packages: st.packages, addons: st.addons, settings: settings, used: st.used, pused: st.pused, special: special, off: st.off, locations: getLocations() };
     payload.v = hash(JSON.stringify(payload));
     try { cache.put(CACHE_KEY, JSON.stringify(payload), CACHE_SECONDS); } catch (err) {}
   }
-  if (e && e.parameter && e.parameter.check) return json({ ok: true, v: payload.v }); // cheap "did anything change?" check
+  if (e && e.parameter && e.parameter.check) { // cheap "did anything change?" check, plus the status of this customer's own requests
+    const out = { ok: true, v: payload.v };
+    if (e.parameter.ids) out.st = statusOf(e.parameter.ids);
+    return json(out);
+  }
   return json(payload);
 }
 
@@ -186,8 +205,7 @@ const SETTINGS_ROWS = [
   ['footer', 'Footer note', 'Your date is not reserved until we reply and confirm.', 'The small line at the very bottom of the page.'],
   ['doneTitle', 'Request sent title', 'Request sent!', 'The heading customers see after sending.'],
   ['doneMsg', 'Request sent message', 'Thank you, {customer}. We will contact you at {phone} to confirm your date for {date}.', 'The message after sending. {customer}, {phone} and {date} are filled in automatically.'],
-  ['doneNote', 'Request sent note', 'Your date is not reserved until we reply and confirm.', 'The second line after sending. Type - to hide it.'],
-  ['doneShot', 'Payment screenshot message', 'Please send screenshots of your payment so we can verify and confirm your reservation. Thank you!', 'The bold line after sending. Type - to hide it.']
+  ['doneNote', 'Request sent note', 'Your date is not reserved until we reply and confirm.', 'The second line after sending. Type - to hide it.']
 ];
 
 const TOGGLE_KEYS = ['showWhatsapp', 'showViber', 'showMessenger', 'showGcash', 'showCall', 'acceptRequests'];
@@ -536,12 +554,12 @@ function doPost(e) {
       if (isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) loc = 'https://www.google.com/maps?q=' + lat.toFixed(6) + ',' + lng.toFixed(6);
     }
 
-    const rSheet = ss.getSheetByName(REQUESTS_SHEET);
+    const rSheet = ss.getSheetByName(REQUESTS_SHEET), reqId = newId();
     rSheet.appendRow([
       new Date(), 'New', name, phone, clean(p.pkg), clean(p.price),
       date, clean(p.time), clean(p.hours), clean(p.venue) + (clean(p.landmark) ? ' (Landmark: ' + clean(p.landmark) + ')' : ''),
       p.delivery ? 'Yes' : 'No (pickup)', clean(p.notes), '', '', clean(p.events), clean(p.addons), clean(p.total), loc,
-      newId(), '', '', '', clean(p.payMethod)
+      reqId, '', '', '', clean(p.payMethod)
     ]);
 
     if (NOTIFY_EMAIL) {
@@ -554,7 +572,7 @@ function doPost(e) {
         '\nPayment method: ' + clean(p.payMethod) + '\nEvent: ' + clean(p.events) + '\nAdd-ons: ' + clean(p.addons) + '\nTotal: ' + clean(p.total) + '\nLocation: ' + (loc || 'not shared') + '\nNotes: ' + clean(p.notes)
       );
     }
-    return json({ ok: true });
+    return json({ ok: true, id: reqId });
   } catch (err) {
     return json({ ok: false, error: 'server' });
   } finally {
@@ -699,6 +717,41 @@ function writeReply(sheet, row, v, date) {
   } else {
     smsCell.clearContent();
   }
+}
+
+/* ---------------- Locations sheet: city + barangay dropdowns on the booking form ---------------- */
+// One row per barangay. Add, edit or delete rows freely. A new city name in column A creates a new city.
+// Cities appear in the order of their first row; barangays in the order of their rows.
+const LOC_SEED = {
+  'Bansud': ['Alcadesma', 'Bato', 'Corazon', 'Malo', 'Manihala', 'Pag-asa', 'Poblacion', 'Proper Bansud', 'Rosacara', 'Salcedo', 'Sumagui', 'Proper Tiguisan', 'Villa Pag-Asa'],
+  'Bongabong': ['Bagumbayan I', 'Labasan', 'Malitbog', 'Ipil'],
+  'Gloria': ['Banus', 'Agsalin', 'Maragooc']
+};
+function setupLocations(ss) {
+  let sh = ss.getSheetByName(LOCATIONS_SHEET);
+  if (!sh) sh = ss.insertSheet(LOCATIONS_SHEET);
+  sh.getRange(1, 1, 1, 2).setValues([['City', 'Barangay']]).setFontWeight('bold').setBackground('#d9e2f3');
+  sh.setFrozenRows(1); sh.setColumnWidth(1, 180); sh.setColumnWidth(2, 220);
+  sh.getRange('A1').setNote('One row per barangay. Type a new City in column A to add a city. Edit or delete any row to change the dropdowns on the website.');
+  if (sh.getLastRow() < 2) {
+    const rows = [];
+    Object.keys(LOC_SEED).forEach(function (c) { LOC_SEED[c].forEach(function (b) { rows.push([c, b]); }); });
+    sh.getRange(2, 1, rows.length, 2).setValues(rows);
+  }
+}
+
+// { 'City': ['Barangay', ...] } or null when the sheet is empty (the website then uses config.js)
+function getLocations() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(LOCATIONS_SHEET);
+  if (!sh || sh.getLastRow() < 2) return null;
+  const out = {};
+  sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues().forEach(function (r) {
+    const c = String(r[0] || '').trim(), b = String(r[1] || '').trim();
+    if (!c) return;
+    out[c] = out[c] || [];
+    if (b && out[c].indexOf(b) < 0) out[c].push(b);
+  });
+  return Object.keys(out).length ? out : null;
 }
 
 /* ---------------- Monitoring sheet: remaining and booked, per date ---------------- */
