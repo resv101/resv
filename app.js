@@ -6,7 +6,7 @@ var USED = {};              // { 'YYYY-MM-DD': { 'Add-on title': how many are al
 var DAYS = {};              // { 'YYYY-MM-DD': { 'Package title' or '*': 'booked'|'hold'|'unavailable' } }, loaded from the Google Sheet
 var daysState = 'loading';  // loading | ok | failed
 var today = new Date(); today.setHours(0,0,0,0);
-var sel = {pkg:null,date:null,name:'',phone:'',house:'',street:'',city:'',brgy:'',time:'8:00 AM',hours:'22',delivery:true,notes:'',website:'',events:[],addons:{},landmark:'',pay:'',loc:null};
+var sel = {pkg:null,date:null,name:'',phone:'',street:'',city:'',brgy:'',time:'8:00 AM',hours:'22',delivery:true,notes:'',website:'',events:[],addons:{},landmark:'',pay:'',loc:null};
 var errors = {};
 var sending = false, sentOk = false;
 var view = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -400,15 +400,14 @@ function renderCal(){
 /* ---------- form (built once so typing never loses focus) ---------- */
 var fName=h('input',{type:'text',id:'f-name',autocomplete:'name',required:true,'aria-describedby':'e-name',oninput:function(e){sel.name=e.target.value;clearErr('name',e.target)}});
 var fPhone=h('input',{type:'tel',id:'f-phone',autocomplete:'tel',inputmode:'numeric',maxlength:'13',pattern:'[0-9 ]*',required:true,'aria-describedby':'e-phone',oninput:function(e){e.target.value=fmtPhone(e.target.value);sel.phone=e.target.value;clearErr('phone',e.target)}});
-var fHouse=h('input',{type:'text',id:'f-house',autocomplete:'off',oninput:function(e){sel.house=e.target.value;renderSummary()}});
-var fStreet=h('input',{type:'text',id:'f-street',autocomplete:'off',oninput:function(e){sel.street=e.target.value;renderSummary()}});
+var fStreet=h('input',{type:'text',id:'f-street',autocomplete:'off',placeholder:'House No. and street',oninput:function(e){sel.street=e.target.value;renderSummary()}});
 var fCity=h('select',{id:'f-city',required:true,'aria-describedby':'e-city',onchange:function(e){sel.city=e.target.value;sel.brgy='';fillBrgy();clearErr('city',e.target)}});
 var fBrgy=h('select',{id:'f-brgy',required:true,'aria-describedby':'e-brgy',onchange:function(e){sel.brgy=e.target.value;clearErr('brgy',e.target)}});
 var fLandmark=h('input',{type:'text',id:'f-landmark',placeholder:'Nearby landmark, like beside the barangay hall',oninput:function(e){sel.landmark=e.target.value;renderSummary()}});
 var fPay=h('select',{id:'f-pay',required:true,'aria-describedby':'e-pay',onchange:function(e){sel.pay=e.target.value;clearErr('pay',e.target)}});
 var LOCS=CONFIG.locations||{}, locKey='';   // { 'City': ['Barangay', ...] } from the Locations sheet
-function venueText(){   // House No, Street, Barangay, City
-  return [sel.house.trim(),sel.street.trim(),sel.brgy,sel.city].filter(Boolean).join(', ');
+function venueText(){   // House No. and Street, Barangay, City
+  return [sel.street.trim(),sel.brgy,sel.city].filter(Boolean).join(', ');
 }
 function fillBrgy(){
   var list=LOCS[sel.city]||[];
@@ -461,8 +460,7 @@ var form=h('form',{novalidate:true,id:'bookform',onsubmit:onSubmit},
   h('div',{class:'fields'},
     h('label',{for:'f-name'},reqLab('Your name'),fName,eName),
     h('label',{for:'f-phone'},reqLab('Mobile number'),fPhone,ePhone),
-    h('label',{for:'f-house'},'House No (optional)',fHouse),
-    h('label',{for:'f-street'},'Street (optional)',fStreet),
+    h('label',{class:'wide',for:'f-street'},'House No. and Street (optional)',fStreet),
     h('label',{for:'f-city'},reqLab('City'),fCity,eCity),
     h('label',{for:'f-brgy'},reqLab('Barangay'),fBrgy,eBrgy),
     h('label',{class:'wide',for:'f-landmark'},'Landmark (optional)',fLandmark),
