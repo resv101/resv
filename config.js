@@ -21,7 +21,7 @@ var CONFIG = {
   // Reminders shown to customers. Delivery: free within freeKm, then perKm for every extra kilometer.
   rules: {deposit:1000, freeKm:5, perKm:30},
   // Paste your Google Apps Script Web App URL here (ends with /exec)
-  scriptUrl: 'https://script.google.com/macros/s/AKfycby6tizdWcPRwFxAIfC-TDNES68EXFm6rdfglvezHGf2-_ssM27imnM9JM9KnGWSCjIqFQ/exec',
+  scriptUrl: 'https://script.google.com/macros/s/AKfycbzWTb8AdOCu-ZbfGbqGYCG9VkDDHp_cGm0KEZ35v78DdWRXLgZ6npRbQMRtC1DYtm6ewg/exec',
   // Your Facebook page username, for the optional Messenger button (example: 'myvideokepage'). Leave '' to hide.
   messenger: '1368190183045322',
   // Phone number to show to customers. Leave '' to hide.
