@@ -548,14 +548,34 @@ function messageText(){
 }
 
 // Asks the phone for its position (the browser shows its own permission prompt). Never blocks sending: any problem gives null.
-function getLocation(){
+// quiet=true: do not touch the Send button text (used after the request is already sent).
+function getLocation(quiet){
   return new Promise(function(resolve){
     if(!navigator.geolocation){resolve(null);return}
-    submitBtn.textContent='Getting location...';
+    if(!quiet) submitBtn.textContent='Getting location...';
     navigator.geolocation.getCurrentPosition(function(pos){
-      submitBtn.textContent='Sending...';
+      if(!quiet) submitBtn.textContent='Sending...';
       resolve({lat:pos.coords.latitude,lng:pos.coords.longitude,acc:Math.round(pos.coords.accuracy)});
-    },function(){submitBtn.textContent='Sending...';resolve(null)},{enableHighAccuracy:true,timeout:8000,maximumAge:60000});
+    },function(){if(!quiet) submitBtn.textContent='Sending...';resolve(null)},{enableHighAccuracy:true,timeout:8000,maximumAge:60000});
+  });
+}
+// Our own friendly "Share your location?" question, shown BEFORE the phone's permission prompt.
+// Yes -> the phone asks for permission and the pin is added to the booking and to the Messenger message. No -> request is sent without a pin.
+function askLocation(){
+  return new Promise(function(resolve){
+    if(!navigator.geolocation){resolve(null);return}
+    dlg.returnValue='';
+    dlg.replaceChildren(
+      h('h3',{id:'dlg-t'},'📍 Share your pin location?'),
+      h('p',{},'Allow '+CONFIG.name+' to see your location? Your map pin will be added to your booking and to your Messenger message, so we can find your venue easily.'),
+      h('p',{class:'hint'},'Your phone will ask for permission next. You can also skip this.'),
+      h('div',{class:'actions'},
+        h('button',{type:'button',class:'btn',autofocus:true,onclick:function(){dlg.close('allow')}},'Yes, share my location'),
+        h('button',{type:'button',class:'btn alt',onclick:function(){dlg.close('skip')}},'No, skip')));
+    dlg.addEventListener('close',function(){
+      if(dlg.returnValue==='allow') getLocation().then(resolve); else resolve(null);
+    },{once:true});
+    dlg.showModal();
   });
 }
 
@@ -587,7 +607,7 @@ function onSubmit(ev){
   var payload={pkg:p.title,price:peso(priceOf(p)),date:sel.date,time:sel.time,hours:sel.hours,venue:venueText(),
     delivery:sel.delivery,events:sel.events.join(', '),addons:chosenAddons().map(addonLabel).join(', '),addonQty:chosenAddons().reduce(function(o,x){o[x.title]=x.q;return o},{}),total:peso(totalFee()),landmark:sel.landmark.trim(),payMethod:sel.pay,name:sel.name.trim(),phone:sel.phone.trim(),notes:sel.notes.trim(),website:sel.website};
   var ctl=new AbortController(), timer;
-  getLocation().then(function(loc){
+  (sel.loc?Promise.resolve(sel.loc):askLocation()).then(function(loc){
     if(loc){payload.lat=loc.lat;payload.lng=loc.lng;payload.acc=loc.acc;sel.loc=loc}
     timer=setTimeout(function(){ctl.abort()},20000);
     return fetch(CONFIG.scriptUrl,{method:'POST',body:JSON.stringify(payload),signal:ctl.signal});   // no custom headers: avoids a CORS preflight
@@ -625,6 +645,18 @@ function showDone(){
   sentOk=true;
   var tot=totalFee();
   var payBlock=h('p',{},h('strong',{},'Total rental fee: '+peso(tot)));
+  var msgrBox=h('div',{});
+  function drawMsgr(){
+    var btn=msgrSendBtn(); if(!btn){ msgrBox.replaceChildren(); return }
+    var kids=[h('div',{class:'contacts'},btn),
+      h('p',{class:'hint'},'Tap the button. Your details'+(sel.loc?' and pin location are':' are')+' already typed in Messenger: just tap Send. If the box is empty, paste (your details are copied).')];
+    if(!sel.loc && navigator.geolocation) kids.push(h('button',{type:'button',class:'btn alt',style:'margin-top:.6rem',onclick:function(e){
+      e.currentTarget.disabled=true; e.currentTarget.textContent='Getting location...';
+      getLocation(true).then(function(l){ if(l) sel.loc=l; drawMsgr(); });
+    }},'📍 Add my pin location to the message'));
+    msgrBox.replaceChildren.apply(msgrBox,kids);
+  }
+  drawMsgr();
   var again=h('button',{type:'button',class:'btn alt',style:'margin-top:.8rem',onclick:function(){
     sentOk=false; doneBox.hidden=true; form.hidden=false;
     sel.pkg=null; sel.date=null; sel.notes=''; fNotes.value=''; setStatus(''); extraBox.replaceChildren();
@@ -635,8 +667,7 @@ function showDone(){
     h('p',{},tx('doneMsg').replace('{customer}',sel.name.trim()).replace('{phone}',sel.phone.trim()).replace('{date}',longDate(sel.date))),
     tx('doneNote')?h('p',{},tx('doneNote')):null,
     payBlock,
-    msgrSendBtn()?h('div',{class:'contacts'},msgrSendBtn()):null,
-    msgrSendBtn()?h('p',{class:'hint'},'Tap the button. Your details'+(sel.loc?' and map location are':' are')+' filled in on Messenger: just tap Send. If the box is empty, paste (your details are copied).'):null,
+    msgrBox,
     contactRow()),again);
   form.hidden=true; doneBox.hidden=false; doneBox.scrollIntoView({behavior:'smooth',block:'center'});
 }
