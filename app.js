@@ -112,8 +112,7 @@ var FALLBACK={pausedMsg:'Online booking is paused right now. Please message us t
   gcashHint:'Open GCash, tap Send Money, and enter the exact amount of your total rental fee.',remTitle:'Reminder',
   footer:'Your date is not reserved until we reply and confirm.',doneTitle:'Request sent!',
   doneMsg:'Thank you, {customer}. We will contact you at {phone} to confirm your date for {date}.',
-  doneNote:'Your date is not reserved until we reply and confirm.',
-  doneShot:'Please send screenshots of your payment so we can verify and confirm your reservation. Thank you!'};
+  doneNote:'Your date is not reserved until we reply and confirm.'};
 (function(){ var r=CONFIG.rules||{};
   FALLBACK.rem1='The reservation fee is included in your total rental fee. It is not an extra charge.';
   FALLBACK.rem2='A '+peso(r.deposit)+' security deposit is collected upon delivery. It is refundable upon pick up, as long as there is no damage and no missing equipment.';
@@ -286,12 +285,6 @@ function contactRow(){
   if(vb) b.push(h('a',{class:'btn contact viber',href:'viber://chat?number=%2B'+vb,rel:'noopener'},svgIcon(ICO.viber),'Viber'));
   if(mn) b.push(h('a',{class:'btn contact msgr',href:'https://m.me/'+encodeURIComponent(mn),target:'_blank',rel:'noopener'},svgIcon(ICO.msgr),'Messenger'));
   return b.length?h('div',{class:'contacts'},b):null;
-}
-function msgrSendBtn(){   // copies the booking details (with the map link) and opens Messenger, so the customer only pastes and sends
-  var mn=messengerName(); if(!mn) return null;
-  return h('a',{class:'btn contact msgr',href:'https://m.me/'+encodeURIComponent(mn),target:'_blank',rel:'noopener',onclick:function(){
-    try{ if(navigator.clipboard) navigator.clipboard.writeText(messageText()); }catch(x){}
-  }},svgIcon(ICO.msgr),'Send my details & location on Messenger');
 }
 function shotNote(){
   return h('p',{class:'hint'},'You can send a screenshot of your payment (reservation fee or full payment) using the buttons below.');
@@ -602,7 +595,7 @@ function onSubmit(ev){
 function showDone(){
   sentOk=true;
   var tot=totalFee();
-  var payBlock=h('p',{},h('strong',{},'Total rental fee: '+peso(tot)),'. The reservation fee is included in it.');
+  var payBlock=h('p',{},h('strong',{},'Total rental fee: '+peso(tot)));
   var again=h('button',{type:'button',class:'btn alt',style:'margin-top:.8rem',onclick:function(){
     sentOk=false; doneBox.hidden=true; form.hidden=false;
     sel.pkg=null; sel.date=null; sel.notes=''; fNotes.value=''; setStatus(''); extraBox.replaceChildren();
@@ -612,10 +605,7 @@ function showDone(){
     h('h3',{},tx('doneTitle')),
     h('p',{},tx('doneMsg').replace('{customer}',sel.name.trim()).replace('{phone}',sel.phone.trim()).replace('{date}',longDate(sel.date))),
     tx('doneNote')?h('p',{},tx('doneNote')):null,
-    tx('doneShot')?h('p',{},h('strong',{},tx('doneShot'))):null,
     payBlock,
-    msgrSendBtn()?h('div',{class:'contacts'},msgrSendBtn()):null,
-    msgrSendBtn()?h('p',{class:'hint'},'Tap the Messenger button. Your booking details'+(sel.loc?' and map location are':' are')+' copied. Just paste and send.'):null,
     contactRow()),again);
   form.hidden=true; doneBox.hidden=false; doneBox.scrollIntoView({behavior:'smooth',block:'center'});
 }
