@@ -20,8 +20,14 @@ var CONFIG = {
   ],
   // Reminders shown to customers. Delivery: free within freeKm, then perKm for every extra kilometer.
   rules: {deposit:1000, freeKm:5, perKm:30},
+  // Cities and barangays for the venue address. Fallback only: the Google Sheet "Locations" tab is used once it has rows.
+  locations: {
+    'Bansud': ['Alcadesma','Bato','Corazon','Malo','Manihala','Pag-asa','Poblacion','Proper Bansud','Rosacara','Salcedo','Sumagui','Proper Tiguisan','Villa Pag-Asa'],
+    'Bongabong': ['Bagumbayan I','Labasan','Malitbog','Ipil'],
+    'Gloria': ['Banus','Agsalin','Maragooc']
+  },
   // Paste your Google Apps Script Web App URL here (ends with /exec)
-  scriptUrl: 'https://script.google.com/macros/s/AKfycbzWTb8AdOCu-ZbfGbqGYCG9VkDDHp_cGm0KEZ35v78DdWRXLgZ6npRbQMRtC1DYtm6ewg/exec',
+  scriptUrl: 'https://script.google.com/macros/s/AKfycbwjEiND__32BKgkPCXaCefzt1bVSSZWIJQEK2Sw1uYQ8Hd7da_lCChh5DQf41-6BczhAQ/exec',
   // Your Facebook page username, for the optional Messenger button (example: 'myvideokepage'). Leave '' to hide.
   messenger: '1368190183045322',
   // Phone number to show to customers. Leave '' to hide.
