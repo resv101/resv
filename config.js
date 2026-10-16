@@ -27,7 +27,7 @@ var CONFIG = {
     'Gloria': ['Banus','Agsalin','Maragooc']
   },
   // Paste your Google Apps Script Web App URL here (ends with /exec)
-  scriptUrl: 'https://script.google.com/macros/s/AKfycbwjEiND__32BKgkPCXaCefzt1bVSSZWIJQEK2Sw1uYQ8Hd7da_lCChh5DQf41-6BczhAQ/exec',
+  scriptUrl: 'https://script.google.com/macros/s/AKfycbyZGfOVKUrcW7n5eJCj7vlxUG5ozMYXdA4LLI9OHR5Ytg6pjm6dRERosyPNhI039CglNg/exec',
   // Your Facebook page username, for the optional Messenger button (example: 'myvideokepage'). Leave '' to hide.
   messenger: '1368190183045322',
   // Phone number to show to customers. Leave '' to hide.
