@@ -587,7 +587,7 @@ function onSubmit(ev){
   })
     .then(function(r){return r.json()})
     .then(function(res){
-      if(res && res.ok){ showDone(); loadDays(true,true); }
+      if(res && res.ok){ trackReq(res.id); showDone(); loadDays(true,true); }
       else if(res && res.error==='taken'){
         var tk=sel.date; sel.date=null; loadDays(true,true); renderSummary(); showDlg('Sorry, that date was just taken',longDate(tk)+' was requested by someone else a moment ago.',tk);
         setStatus('Sorry, that date was just taken. Please choose another date.',true);
@@ -676,13 +676,45 @@ function loadDays(quiet,force){
     })
     .catch(function(){ if(!quiet){ daysState='failed'; renderCal(); } });
 }
+/* ---------- pop-up when the owner answers this customer's request (Accepted / Hold / Declined) ---------- */
+// Requests sent from this device are remembered here and checked with the same quick check as the calendar.
+var REQS='arReqs';
+function readReqs(){ try{ var a=JSON.parse(localStorage.getItem(REQS)||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function saveReqs(a){ try{ localStorage.setItem(REQS,JSON.stringify(a)); }catch(e){} }
+function trackReq(id){
+  if(!id) return;
+  var a=readReqs().filter(function(r){return r.id!==id});
+  a.push({id:id,date:sel.date,pkg:(pkgById(sel.pkg)||{}).title||'',name:sel.name.trim(),seen:'new'}); saveReqs(a);
+}
+saveReqs(readReqs().filter(function(r){return r.date>=key(today)}));   // forget requests whose event date has passed
+function showStatus(r,st){
+  var d=longDate(r.date), who=r.name?'Hi '+r.name+'! ':'', t=r.pkg||'your package', title, msg, again=false;
+  if(st==='accepted'){ title='Your booking is confirmed!'; msg=who+'Your '+t+' on '+d+' is CONFIRMED. Thank you for choosing '+CONFIG.name+'!'; }
+  else if(st==='hold'){ title='Your date is on hold'; msg=who+'We are holding '+d+' for your '+t+'. We will contact you to lock in your booking.'; }
+  else { title='Sorry, we are not available'; msg=who+'We are not available on '+d+' for the '+t+'. You are welcome to book another date.'; again=true; }
+  if(dlg.open) dlg.close();
+  dlg.replaceChildren(h('h3',{id:'dlg-t'},title),h('p',{},msg),
+    h('div',{class:'actions'},h('button',{type:'button',class:'btn',autofocus:true,onclick:function(){ dlg.close(); if(again) calBox.scrollIntoView({behavior:'smooth',block:'start'}); }},again?'Choose another date':'OK')));
+  dlg.showModal();
+}
+function handleStatuses(st){
+  if(!st||dlg.open) return;   // one pop-up at a time; the next one shows on the next check
+  var a=readReqs(), changed=false, shown=false;
+  a.forEach(function(r){
+    var s=st[r.id]; if(!s||s===r.seen||shown) return;
+    r.seen=s; changed=true;
+    if(s==='accepted'||s==='hold'||s==='declined'){ shown=true; showStatus(r,s); }
+  });
+  if(changed) saveReqs(a);
+}
 // Cheap "did anything change?" check every few seconds (catches Accepted / Hold edits in the sheet).
 var checking=false;
 function check(){
   if(!CONFIG.scriptUrl||document.hidden||checking) return;
   checking=true;
-  fetch(CONFIG.scriptUrl+'?check=1&t='+Date.now(),{cache:'no-store'}).then(function(r){return r.json()})
-    .then(function(res){ if(res&&res.ok&&res.v!==ver) loadDays(true); }).catch(function(){})
+  var ids=readReqs().map(function(r){return r.id}).join(',');
+  fetch(CONFIG.scriptUrl+'?check=1&t='+Date.now()+(ids?'&ids='+encodeURIComponent(ids):''),{cache:'no-store'}).then(function(r){return r.json()})
+    .then(function(res){ if(res&&res.ok){ if(res.v!==ver) loadDays(true); handleStatuses(res.st); } }).catch(function(){})
     .then(function(){ checking=false; });
 }
 setInterval(check,Math.max(3,CONFIG.checkSeconds||5)*1000);
@@ -692,5 +724,6 @@ document.addEventListener('visibilitychange',check);
 var boot=readCache();
 if(boot){ daysState='ok'; applyPayload(boot); loadDays(true); }   // opens with the last known data, then updates silently
 else { applyText(null); renderPkgs(); renderAddons(); renderSummary(); renderRem(); renderPay(); loadDays(); }
+check();   // also answers a request that was decided while this page was closed
 formBox.append(callEl);
 })();
