@@ -614,7 +614,7 @@ function onSubmit(ev){
   })
     .then(function(r){return r.json()})
     .then(function(res){
-      if(res && res.ok){ trackReq(res.id); showDone(); loadDays(true,true); }
+      if(res && res.ok){ sel.reqId=res.id; trackReq(res.id); showDone(); loadDays(true,true); }
       else if(res && res.error==='taken'){
         var tk=sel.date; sel.date=null; loadDays(true,true); renderSummary(); showDlg('Sorry, that date was just taken',longDate(tk)+' was requested by someone else a moment ago.',tk);
         setStatus('Sorry, that date was just taken. Please choose another date.',true);
@@ -652,7 +652,13 @@ function showDone(){
       h('p',{class:'hint'},'Tap the button. Your details'+(sel.loc?' and pin location are':' are')+' already typed in Messenger: just tap Send. If the box is empty, paste (your details are copied).')];
     if(!sel.loc && navigator.geolocation) kids.push(h('button',{type:'button',class:'btn alt',style:'margin-top:.6rem',onclick:function(e){
       e.currentTarget.disabled=true; e.currentTarget.textContent='Getting location...';
-      getLocation(true).then(function(l){ if(l) sel.loc=l; drawMsgr(); });
+      getLocation(true).then(function(l){
+        if(l){ sel.loc=l;
+          // also save the pin on the Google Sheet row of this request (silent: the Messenger message works even if this fails)
+          if(sel.reqId&&CONFIG.scriptUrl){ try{ fetch(CONFIG.scriptUrl,{method:'POST',body:JSON.stringify({action:'addLoc',id:sel.reqId,lat:l.lat,lng:l.lng})}).catch(function(){}); }catch(x){} }
+        }
+        drawMsgr();
+      });
     }},'📍 Add my pin location to the message'));
     msgrBox.replaceChildren.apply(msgrBox,kids);
   }
