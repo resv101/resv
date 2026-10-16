@@ -4,12 +4,13 @@
 var CONFIG = {
   name: 'AARF Karaoke & Event Rentals',
   logo: 'images/logo.png',
-  // The page asks the Google Sheet "did anything change?" every checkSeconds (5 = your sheet edits show up within a few seconds), and fully reloads every refreshMinutes.
+  // Silent refresh (the page never reloads or blinks; only the parts that changed are redrawn).
+  // checkSeconds: how often the page asks the Google Sheet "did anything change?" (5 = your sheet edits show up in a few seconds).
+  // refreshMinutes: a full safety re-download of the data, also silent.
   checkSeconds: 5, refreshMinutes: 5,
-  // The whole page also reloads every reloadMinutes, but only when the customer has not started a request.
-  reloadMinutes: 10,
-  // GCash. Best: paste a fixed-amount payment link (made in PayMongo, HitPay, etc.) into each package's payUrl below.
-  // Backup: fill in your GCash number and customers see the exact amount to send.
+  // Booking window (how many days ahead customers can book) is in the Google Sheet > Settings:
+  //   "Earliest booking date" and "Latest booking date" (example: 30 = only the next 30 days are open).
+  // GCash number: a fallback. The Settings sheet (GCash number) is used once it has a value.
   gcash: {number:'09997114240', name:''},
   events: ['Birthday','Debut','Reunion','Wedding','Christening','Anniversary','Graduation','Fiesta','Company party','Other'],
   addons: [
@@ -19,8 +20,6 @@ var CONFIG = {
   ],
   // Reminders shown to customers. Delivery: free within freeKm, then perKm for every extra kilometer.
   rules: {deposit:1000, freeKm:5, perKm:30},
-  // Amount customers pay on GCash. 0 = the full total rental fee. Put a number (example: 500) to ask only for a reservation fee.
-  reservationFee: 0,
   // Paste your Google Apps Script Web App URL here (ends with /exec)
   scriptUrl: 'https://script.google.com/macros/s/AKfycbwjEiND__32BKgkPCXaCefzt1bVSSZWIJQEK2Sw1uYQ8Hd7da_lCChh5DQf41-6BczhAQ/exec',
   // Your Facebook page username, for the optional Messenger button (example: 'myvideokepage'). Leave '' to hide.
@@ -31,11 +30,11 @@ var CONFIG = {
   viber: '09997114240',
   whatsapp: '09997114240',
   packages: [
-    {id:'standard', icon:'🎤', image:'', payUrl:'', regular:'1,500', title:'Standard Package', price:'1,200', note:'per event, up to 22 hrs',
+    {id:'standard', icon:'🎤', image:'', regular:'1,500', title:'Standard Package', price:'1,200', note:'per event, up to 22 hrs',
      items:['Sony ULT Tower 7 420W Speaker','Xiaomi 32 inch LED TV','Platinum XL SD with 23k Songs','Platinum jukebox keypad','Behringer wired mic & 1 Platinum wired mic','Song book 23k songs']},
-    {id:'pro', icon:'🔊', image:'', payUrl:'', regular:'1,800', title:'Pro Package', price:'1,500', note:'per event, up to 22 hrs',
+    {id:'pro', icon:'🔊', image:'', regular:'1,800', title:'Pro Package', price:'1,500', note:'per event, up to 22 hrs',
      items:['JBL Partybox 710 800W Speaker','Xiaomi 32 inch LED TV','Platinum XL SD with 23k Songs','Platinum jukebox keypad','JBL Partybox Wireless Mic 2','Song book 23k songs','1 High Chair']},
-    {id:'premium', icon:'🎉', image:'', payUrl:'', regular:'2,300', title:'Premium Package', price:'1,800', note:'per event, up to 22 hrs',
+    {id:'premium', icon:'🎉', image:'', regular:'2,300', title:'Premium Package', price:'1,800', note:'per event, up to 22 hrs',
      items:['JBL Partybox 720 800W Speaker with built-in Battery','Xiaomi 43 inch QLED TV 4k Display','Platinum Piano 4k - 4k Output Display','JBL Easysing Wireless Mic with AI','Song book 23k songs','2 High bar Chair']}
   ]
 };
