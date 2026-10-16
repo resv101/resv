@@ -195,7 +195,7 @@ function renderPkgs(){
       renderCal(); renderSummary(); if(bad) showTaken(was,bad);
     }},
       h('div',{class:'pkg-row'},
-        h('div',{class:'pkg-img'},h('img',{src:imgSrc(p.image||'images/'+slug(p.title)+'.jpg'),alt:p.title,loading:'lazy',onerror:function(e){e.target.replaceWith(document.createTextNode(p.icon||'🎤'))}})),
+        h('div',{class:'pkg-img'},pkgImg(p)),
         h('div',{class:'pkg-main'},
           h('div',{class:'pkg-top'},
             h('span',{class:'pkg-title'},p.title),
@@ -206,6 +206,12 @@ function renderPkgs(){
           seatText(p)?h('p',{class:'seats'},seatText(p)):null,
           h('ul',{},(p.items||[]).map(function(i){return h('li',{},i)})))));
   }));
+}
+var IMGS={};   // image elements are kept and reused, so a silent refresh never makes pictures blink
+function pkgImg(p){
+  var src=imgSrc(p.image||'images/'+slug(p.title)+'.jpg'), k=p.title+'|'+src;
+  if(!IMGS[k]) IMGS[k]=h('img',{src:src,alt:p.title,decoding:'async',onerror:function(e){var t=document.createTextNode(p.icon||'🎤'); e.target.replaceWith(t); IMGS[k]=t}});
+  return IMGS[k];
 }
 var addonDate='';
 function renderAddons(){
@@ -251,18 +257,11 @@ function gnum(){
   return cfg('gcashNumber',(CONFIG.gcash||{}).number).replace(/\D/g,'').replace(/^(\d{4})(\d{3})(\d{4})$/,'$1 $2 $3');
 }
 function gname(){return cfg('gcashName',(CONFIG.gcash||{}).name)}
-function hasPay(){ return !!gnum() || CONFIG.packages.some(function(p){return p.payUrl}); }
 function copyBtn(txt,label){
   return h('button',{type:'button',class:'btn alt',onclick:function(e){
     var b=e.currentTarget;
     (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(function(){b.textContent='Copied!'},function(){window.prompt('Copy this:',txt)});
   }},label);
-}
-function payRow(title,amt,url){
-  var n=[h('span',{class:'pay-name'},title+' · '+peso(amt))];
-  if(url) n.push(h('a',{class:'btn gcash',href:url,target:'_blank',rel:'noopener'},'Pay '+peso(amt)+' with GCash'));
-  else if(gnum()) n.push(copyBtn(gnum().replace(/\s/g,''),'Copy GCash number'));
-  return h('div',{class:'payrow'},n);
 }
 // Messenger, Viber and WhatsApp buttons with icons. Numbers come from config.js (viber, whatsapp). '' hides a button.
 function intl(v){var d=String(v||'').replace(/\D/g,''); if(d.indexOf('0')===0) d='63'+d.slice(1); return d}
@@ -296,12 +295,6 @@ function msgrSendBtn(){   // copies the booking details (with the map link) and 
 }
 function shotNote(){
   return h('p',{class:'hint'},'You can send a screenshot of your payment (reservation fee or full payment) using the buttons below.');
-}
-function payInfo(){
-  return gnum()?h('p',{class:'hint'},'GCash number: ',h('strong',{},gnum()),gname()?' ('+gname()+')':'','. Open GCash, tap Send Money, and enter the exact amount.'):null;
-}
-function payInfoFull(){
-  return [payInfo(),shotNote()];
 }
 function paySection(){
   if(!gnum()) return null;
@@ -417,9 +410,12 @@ var fPhone=h('input',{type:'tel',id:'f-phone',autocomplete:'tel',inputmode:'nume
 var fVenue=h('input',{type:'text',id:'f-venue',placeholder:'Street, barangay, city, or hall name',required:true,'aria-describedby':'e-venue',oninput:function(e){sel.venue=e.target.value;clearErr('venue',e.target)}});
 var fLandmark=h('input',{type:'text',id:'f-landmark',placeholder:'Nearby landmark, like beside the barangay hall',oninput:function(e){sel.landmark=e.target.value;renderSummary()}});
 var fPay=h('select',{id:'f-pay',required:true,'aria-describedby':'e-pay',onchange:function(e){sel.pay=e.target.value;clearErr('pay',e.target)}});
+var payKey='';
 function renderPayOptions(){   // the choices come from the Settings sheet (Payment methods)
   var list=cfg('payMethods','GCash, Maya, Bank Transfer, Cash').split(',').map(function(s){return s.trim()}).filter(Boolean);
   if(!list.length) list=['GCash'];
+  if(list.join('|')===payKey) return;   // nothing changed: leave the open dropdown alone
+  payKey=list.join('|');
   if(sel.pay&&list.indexOf(sel.pay)<0) sel.pay='';
   fPay.replaceChildren.apply(fPay,[h('option',{value:''},'Select payment method')].concat(list.map(function(x){return h('option',{value:x,selected:x===sel.pay},x)})));
 }
@@ -576,21 +572,21 @@ function onSubmit(ev){
   })
     .then(function(r){return r.json()})
     .then(function(res){
-      if(res && res.ok){ showDone(); loadDays(true); }
+      if(res && res.ok){ showDone(); loadDays(true,true); }
       else if(res && res.error==='taken'){
-        var tk=sel.date; sel.date=null; loadDays(true); renderSummary(); showDlg('Sorry, that date was just taken',longDate(tk)+' was requested by someone else a moment ago.',tk);
+        var tk=sel.date; sel.date=null; loadDays(true,true); renderSummary(); showDlg('Sorry, that date was just taken',longDate(tk)+' was requested by someone else a moment ago.',tk);
         setStatus('Sorry, that date was just taken. Please choose another date.',true);
         calErr.textContent='Please choose another date.';
         calBox.scrollIntoView({behavior:'smooth',block:'start'});
       } else if(res && res.error==='addon'){
-        loadDays(true);
+        loadDays(true,true);
         setStatus('Sorry, '+(res.item||'an add-on')+' was just booked by someone else for that date. Please check the add-ons again and resend.',true);
         addonBox.scrollIntoView({behavior:'smooth',block:'start'});
       } else if(res && res.error==='price'){
-        loadDays(true);
+        loadDays(true,true);
         setStatus('The price for that date was just updated. Please check your total and send again.',true);
       } else if(res && res.error==='closed'){
-        var cd=sel.date; sel.date=null; loadDays(true); renderCal(); renderSummary();
+        var cd=sel.date; sel.date=null; loadDays(true,true); renderCal(); renderSummary();
         setStatus('Sorry, '+longDate(cd)+' is not open for online booking. Please choose another date.',true);
         calErr.textContent='Please choose another date.';
         calBox.scrollIntoView({behavior:'smooth',block:'start'});
@@ -605,9 +601,8 @@ function onSubmit(ev){
 
 function showDone(){
   sentOk=true;
-  var pp=pkgById(sel.pkg), tot=totalFee(), amt=num(CONFIG.reservationFee)||tot;
+  var tot=totalFee();
   var payBlock=h('p',{},h('strong',{},'Total rental fee: '+peso(tot)),'. The reservation fee is included in it.');
-  var phone=null;
   var again=h('button',{type:'button',class:'btn alt',style:'margin-top:.8rem',onclick:function(){
     sentOk=false; doneBox.hidden=true; form.hidden=false;
     sel.pkg=null; sel.date=null; sel.notes=''; fNotes.value=''; setStatus(''); extraBox.replaceChildren();
@@ -618,18 +613,22 @@ function showDone(){
     h('p',{},tx('doneMsg').replace('{customer}',sel.name.trim()).replace('{phone}',sel.phone.trim()).replace('{date}',longDate(sel.date))),
     tx('doneNote')?h('p',{},tx('doneNote')):null,
     tx('doneShot')?h('p',{},h('strong',{},tx('doneShot'))):null,
-    payBlock,phone,
+    payBlock,
     msgrSendBtn()?h('div',{class:'contacts'},msgrSendBtn()):null,
     msgrSendBtn()?h('p',{class:'hint'},'Tap the Messenger button. Your booking details'+(sel.loc?' and map location are':' are')+' copied. Just paste and send.'):null,
     contactRow()),again);
   form.hidden=true; doneBox.hidden=false; doneBox.scrollIntoView({behavior:'smooth',block:'center'});
 }
 
-/* ---------- load booked dates from the Google Sheet ---------- */
-var ver='', lastSig='';
-function applyData(res){
+/* ---------- load booked dates from the Google Sheet (silent: no reload, no flicker) ---------- */
+var ver='', pending=null;
+var CACHE='arPayload';   // last data from the sheet, kept on the device so the page opens already filled in
+function saveCache(res){ try{ localStorage.setItem(CACHE,JSON.stringify(res)); }catch(e){} }
+function readCache(){ try{ var c=JSON.parse(localStorage.getItem(CACHE)||'null'); return c&&c.ok?c:null; }catch(e){ return null; } }
+// Draws new sheet data. Returns the chosen date if it was just taken by someone else.
+function applyPayload(res){
+  DAYS=res.days||{}; USED=res.used||{}; PUSED=res.pused||{}; OFF=res.off||{}; ver=res.v||'';
   applyText(res.settings); renderPayOptions();
-  var sig=JSON.stringify([res.packages,res.addons,res.settings,res.used,res.pused,res.special,res.off]); if(sig===lastSig) return; lastSig=sig;
   var ICONS=['🎤','🔊','🎉'], selT=(pkgById(sel.pkg)||{}).title, adQ={}; chosenAddons().forEach(function(x){adQ[x.title]=x.q});
   if(res.packages&&res.packages.length) CONFIG.packages=res.packages.map(function(p,i){p.id=slug(p.title);p.icon=ICONS[i%3];return p});
   if(res.addons) CONFIG.addons=res.addons.map(function(x){x.id=slug(x.title);return x});
@@ -637,24 +636,34 @@ function applyData(res){
   if(sel.date&&!inWindow(fromKey(sel.date))) sel.date=null;   // the booking window changed and the chosen date fell outside it
   var np=CONFIG.packages.filter(function(p){return p.title===selT})[0]; sel.pkg=(np&&np.available!==false)?np.id:null;
   sel.addons={}; (CONFIG.addons||[]).forEach(function(x){ if(x.available&&adQ[x.title]) sel.addons[x.id]=Math.min(adQ[x.title],maxQty(x)); });
+  var lost=(sel.date&&stateFor(sel.date))?sel.date:null; if(lost) sel.date=null;
   renderPkgs(); renderAddons(); renderCal(); renderSummary(); renderRem(); renderPay();
+  return lost;
 }
-function loadDays(quiet){
+function interacting(){   // an open quantity list must not be redrawn under the customer's finger
+  var a=document.activeElement; return !!(a&&addonBox.contains(a)&&(a.tagName==='SELECT'||a.type==='checkbox'));
+}
+function commit(res,quiet){
+  var lost=applyPayload(res);
+  if(lost&&quiet&&!sentOk) showDlg('Your date is no longer open',longDate(lost)+' was just taken. Please pick another date.',lost);
+}
+addonBox.addEventListener('focusout',function(){ setTimeout(function(){ if(pending&&!interacting()){ var r=pending; pending=null; commit(r,true); } },250); });
+function loadDays(quiet,force){
   if(!CONFIG.scriptUrl){ daysState='ok'; renderCal(); return; }
   if(!quiet){ daysState='loading'; renderCal(); }
   fetch(CONFIG.scriptUrl+'?t='+Date.now(),{cache:'no-store'})   // the time stamp keeps phones and networks from showing old dates
     .then(function(r){return r.json()})
     .then(function(res){
       if(!res||!res.ok) throw new Error('bad');
-      DAYS=res.days||{}; USED=res.used||{}; PUSED=res.pused||{}; OFF=res.off||{}; ver=res.v||''; daysState='ok'; applyData(res);
-      var lost=(sel.date && stateFor(sel.date))?sel.date:null;
-      if(lost) sel.date=null;
-      renderCal(); renderSummary();
-      if(lost && quiet && !sentOk) showDlg('Your date is no longer open',longDate(lost)+' was just taken. Please pick another date.',lost);
+      var wasOk=daysState==='ok'; daysState='ok';
+      if(wasOk&&!force&&res.v&&res.v===ver) return;   // same data as on screen: touch nothing
+      saveCache(res);
+      if(interacting()){ pending=res; return; }
+      commit(res,quiet);
     })
     .catch(function(){ if(!quiet){ daysState='failed'; renderCal(); } });
 }
-// Quick check for changes (catches Accepted / Hold edits in the sheet), plus a full reload every few minutes.
+// Cheap "did anything change?" check every few seconds (catches Accepted / Hold edits in the sheet).
 var checking=false;
 function check(){
   if(!CONFIG.scriptUrl||document.hidden||checking) return;
@@ -664,14 +673,11 @@ function check(){
     .then(function(){ checking=false; });
 }
 setInterval(check,Math.max(3,CONFIG.checkSeconds||5)*1000);
-setInterval(function(){ if(!document.hidden) loadDays(true); },(CONFIG.refreshMinutes||5)*60000);
+setInterval(function(){ if(!document.hidden) loadDays(true); },(CONFIG.refreshMinutes||5)*60000);   // safety net: the page is never reloaded
 document.addEventListener('visibilitychange',check);
-// Reload the whole page every few minutes, but only when nobody is in the middle of a request.
-function idle(){
-  return !sending&&!sentOk&&!dlg.open&&!sel.pkg&&!sel.date&&!sel.name&&!sel.phone&&!sel.venue&&!sel.notes&&!sel.events.length&&!Object.keys(sel.addons).length;
-}
-setInterval(function(){ if(idle()) location.reload(); },(CONFIG.reloadMinutes||10)*60000);
 
-applyText(null); renderPkgs(); renderAddons(); renderSummary(); renderRem(); renderPay(); loadDays();
+var boot=readCache();
+if(boot){ daysState='ok'; applyPayload(boot); loadDays(true); }   // opens with the last known data, then updates silently
+else { applyText(null); renderPkgs(); renderAddons(); renderSummary(); renderRem(); renderPay(); loadDays(); }
 formBox.append(callEl);
 })();
