@@ -6,7 +6,7 @@ var USED = {};              // { 'YYYY-MM-DD': { 'Add-on title': how many are al
 var DAYS = {};              // { 'YYYY-MM-DD': { 'Package title' or '*': 'booked'|'hold'|'unavailable' } }, loaded from the Google Sheet
 var daysState = 'loading';  // loading | ok | failed
 var today = new Date(); today.setHours(0,0,0,0);
-var sel = {pkg:null,date:null,name:'',phone:'',venue:'',time:'8:00 AM',hours:'22',delivery:true,notes:'',website:'',events:[],addons:{},landmark:'',pay:'',loc:null};
+var sel = {pkg:null,date:null,name:'',phone:'',house:'',street:'',city:'',brgy:'',time:'8:00 AM',hours:'22',delivery:true,notes:'',website:'',events:[],addons:{},landmark:'',pay:'',loc:null};
 var errors = {};
 var sending = false, sentOk = false;
 var view = new Date(today.getFullYear(), today.getMonth(), 1);
@@ -400,9 +400,28 @@ function renderCal(){
 /* ---------- form (built once so typing never loses focus) ---------- */
 var fName=h('input',{type:'text',id:'f-name',autocomplete:'name',required:true,'aria-describedby':'e-name',oninput:function(e){sel.name=e.target.value;clearErr('name',e.target)}});
 var fPhone=h('input',{type:'tel',id:'f-phone',autocomplete:'tel',inputmode:'numeric',maxlength:'13',pattern:'[0-9 ]*',required:true,'aria-describedby':'e-phone',oninput:function(e){e.target.value=fmtPhone(e.target.value);sel.phone=e.target.value;clearErr('phone',e.target)}});
-var fVenue=h('input',{type:'text',id:'f-venue',placeholder:'Street, barangay, city, or hall name',required:true,'aria-describedby':'e-venue',oninput:function(e){sel.venue=e.target.value;clearErr('venue',e.target)}});
+var fHouse=h('input',{type:'text',id:'f-house',autocomplete:'off',oninput:function(e){sel.house=e.target.value;renderSummary()}});
+var fStreet=h('input',{type:'text',id:'f-street',autocomplete:'off',oninput:function(e){sel.street=e.target.value;renderSummary()}});
+var fCity=h('select',{id:'f-city',required:true,'aria-describedby':'e-city',onchange:function(e){sel.city=e.target.value;sel.brgy='';fillBrgy();clearErr('city',e.target)}});
+var fBrgy=h('select',{id:'f-brgy',required:true,'aria-describedby':'e-brgy',onchange:function(e){sel.brgy=e.target.value;clearErr('brgy',e.target)}});
 var fLandmark=h('input',{type:'text',id:'f-landmark',placeholder:'Nearby landmark, like beside the barangay hall',oninput:function(e){sel.landmark=e.target.value;renderSummary()}});
 var fPay=h('select',{id:'f-pay',required:true,'aria-describedby':'e-pay',onchange:function(e){sel.pay=e.target.value;clearErr('pay',e.target)}});
+var LOCS=CONFIG.locations||{}, locKey='';   // { 'City': ['Barangay', ...] } from the Locations sheet
+function venueText(){   // House No, Street, Barangay, City
+  return [sel.house.trim(),sel.street.trim(),sel.brgy,sel.city].filter(Boolean).join(', ');
+}
+function fillBrgy(){
+  var list=LOCS[sel.city]||[];
+  if(sel.brgy&&list.indexOf(sel.brgy)<0) sel.brgy='';
+  fBrgy.disabled=!sel.city;
+  fBrgy.replaceChildren.apply(fBrgy,[h('option',{value:''},sel.city?'Select barangay':'Select city first')].concat(list.map(function(x){return h('option',{value:x,selected:x===sel.brgy},x)})));
+}
+function renderLocs(){   // rebuilt only when the Locations sheet really changed
+  var k=JSON.stringify(LOCS); if(k===locKey) return; locKey=k;
+  if(sel.city&&!LOCS[sel.city]) sel.city='';
+  fCity.replaceChildren.apply(fCity,[h('option',{value:''},'Select city')].concat(Object.keys(LOCS).map(function(c){return h('option',{value:c,selected:c===sel.city},c)})));
+  fillBrgy();
+}
 var payKey='';
 function renderPayOptions(){   // the choices come from the Settings sheet (Payment methods)
   var list=cfg('payMethods','GCash, Maya, Bank Transfer, Cash').split(',').map(function(s){return s.trim()}).filter(Boolean);
@@ -412,15 +431,15 @@ function renderPayOptions(){   // the choices come from the Settings sheet (Paym
   if(sel.pay&&list.indexOf(sel.pay)<0) sel.pay='';
   fPay.replaceChildren.apply(fPay,[h('option',{value:''},'Select payment method')].concat(list.map(function(x){return h('option',{value:x,selected:x===sel.pay},x)})));
 }
-renderPayOptions();
+renderPayOptions(); renderLocs();
 var times=[];for(var t=8;t<=21;t++){var hh=t>12?t-12:t;times.push(hh+':00 '+(t<12?'AM':'PM'))}
 var fTime=h('select',{id:'f-time',onchange:function(e){sel.time=e.target.value;renderSummary()}},times.map(function(x){return h('option',{value:x,selected:x===sel.time},x)}));
 var fHours=h('select',{id:'f-hours',onchange:function(e){sel.hours=e.target.value;renderSummary()}},['3','4','5','6','8','10','12','16','22'].map(function(x){return h('option',{value:x,selected:x===sel.hours},x+' hours')}));
 var fDelivery=h('input',{type:'checkbox',id:'f-delivery',checked:true,onchange:function(e){sel.delivery=e.target.checked;renderSummary()}});
 var fNotes=h('textarea',{id:'f-notes',placeholder:'Number of guests, anything we should know',oninput:function(e){sel.notes=e.target.value}});
 var fHp=h('input',{type:'text',id:'f-website',tabindex:'-1',autocomplete:'off','aria-hidden':'true',oninput:function(e){sel.website=e.target.value}});
-var eName=h('span',{class:'err',id:'e-name'}), ePhone=h('span',{class:'err',id:'e-phone'}), eVenue=h('span',{class:'err',id:'e-venue'}), eEvents=h('span',{class:'err',id:'e-events',role:'alert'}), ePay=h('span',{class:'err',id:'e-pay'});
-var errEls={name:eName,phone:ePhone,venue:eVenue,events:eEvents,pay:ePay}, inEls={name:fName,phone:fPhone,venue:fVenue,pay:fPay};
+var eName=h('span',{class:'err',id:'e-name'}), ePhone=h('span',{class:'err',id:'e-phone'}), eCity=h('span',{class:'err',id:'e-city'}), eBrgy=h('span',{class:'err',id:'e-brgy'}), eEvents=h('span',{class:'err',id:'e-events',role:'alert'}), ePay=h('span',{class:'err',id:'e-pay'});
+var errEls={name:eName,phone:ePhone,city:eCity,brgy:eBrgy,events:eEvents,pay:ePay}, inEls={name:fName,phone:fPhone,city:fCity,brgy:fBrgy,pay:fPay};
 function reqLab(t){return h('span',{},t,h('span',{class:'req','aria-hidden':'true'},' *'))}   // red star for required fields
 var evBox=h('fieldset',{class:'events wide'},h('legend',{},reqLab('Type of event (tick all that apply)')),
   h('div',{class:'opts'},(CONFIG.events||[]).map(function(n){
@@ -442,7 +461,10 @@ var form=h('form',{novalidate:true,id:'bookform',onsubmit:onSubmit},
   h('div',{class:'fields'},
     h('label',{for:'f-name'},reqLab('Your name'),fName,eName),
     h('label',{for:'f-phone'},reqLab('Mobile number'),fPhone,ePhone),
-    h('label',{class:'wide',for:'f-venue'},reqLab('Event venue address'),fVenue,eVenue),
+    h('label',{for:'f-house'},'House No (optional)',fHouse),
+    h('label',{for:'f-street'},'Street (optional)',fStreet),
+    h('label',{for:'f-city'},reqLab('City'),fCity,eCity),
+    h('label',{for:'f-brgy'},reqLab('Barangay'),fBrgy,eBrgy),
     h('label',{class:'wide',for:'f-landmark'},'Landmark (optional)',fLandmark),
     h('label',{for:'f-time'},'Start time',fTime),
     h('label',{for:'f-hours'},'Hours needed',fHours),
@@ -469,6 +491,7 @@ function renderSummary(){
     chosenAddons().length?row('Add-ons',chosenAddons().map(function(x){return addonLabel(x)+' ('+peso(num(x.price)*x.q)+')'}).join(', ')):[],
     row('Date',sel.date?longDate(sel.date):'Not chosen yet'),
     sel.landmark.trim()?row('Landmark',sel.landmark.trim()):[],
+    sel.city?row('Venue',venueText()):[],
     row('Time',sel.time+' for '+sel.hours+' hours'),
     row('Delivery',sel.delivery?'Delivery and setup':'I will pick up'),
     sel.pay?row('Payment method',sel.pay):[],
@@ -479,7 +502,7 @@ function renderSummary(){
 
 function validate(){
   errors={};
-  ['name','phone','venue','events','pay'].forEach(function(k){errEls[k].textContent='';inEls[k].removeAttribute('aria-invalid')});
+  ['name','phone','city','brgy','events','pay'].forEach(function(k){errEls[k].textContent='';inEls[k].removeAttribute('aria-invalid')});
   pkgErr.textContent=''; calErr.textContent='';
   var first=null;
   if(!sel.pkg){pkgErr.textContent='Please choose a package.'; first=first||pkgBox.querySelector('button')}
@@ -490,7 +513,8 @@ function validate(){
   }
   if(sel.name.trim().length<2){setErr('name','Your name is required. Please enter your name.'); first=first||fName}
   if(!phoneOk(sel.phone)){setErr('phone',sel.phone.trim()?'Enter your 11-digit mobile number, like 0995 252 5426.':'Please enter your mobile number.'); first=first||fPhone}
-  if(!sel.venue.trim()){setErr('venue','Please enter the event venue address.'); first=first||fVenue}
+  if(!sel.city){setErr('city','Please select a city.'); first=first||fCity}
+  if(sel.city&&!sel.brgy){setErr('brgy','Please select a barangay.'); first=first||fBrgy}
   if(!sel.pay){setErr('pay','Please select a payment method.'); first=first||fPay}
   if(!sel.events.length){setErr('events','Please tick at least one type of event.'); first=first||evBox.querySelector('input')}
   if(first){first.focus(); first.scrollIntoView({block:'center',behavior:'smooth'}); return false}
@@ -503,7 +527,7 @@ function messageText(){
     '• Package: '+(p?p.title:''),
     '• Date: '+longDate(sel.date),
     '• Start: '+sel.time+' for '+sel.hours+' hours',
-    '• Venue: '+sel.venue.trim(),
+    '• Venue: '+venueText(),
     (sel.landmark.trim()?'• Landmark: '+sel.landmark.trim():null),
     (sel.loc?'• My location: https://www.google.com/maps?q='+sel.loc.lat+','+sel.loc.lng:null),
     (sel.pay?'• Payment method: '+sel.pay:null),
@@ -555,7 +579,7 @@ function onSubmit(ev){
   }
   sending=true; submitBtn.disabled=true; submitBtn.textContent='Sending...'; setStatus('');
   var p=pkgById(sel.pkg);
-  var payload={pkg:p.title,price:peso(priceOf(p)),date:sel.date,time:sel.time,hours:sel.hours,venue:sel.venue.trim(),
+  var payload={pkg:p.title,price:peso(priceOf(p)),date:sel.date,time:sel.time,hours:sel.hours,venue:venueText(),
     delivery:sel.delivery,events:sel.events.join(', '),addons:chosenAddons().map(addonLabel).join(', '),addonQty:chosenAddons().reduce(function(o,x){o[x.title]=x.q;return o},{}),total:peso(totalFee()),landmark:sel.landmark.trim(),payMethod:sel.pay,name:sel.name.trim(),phone:sel.phone.trim(),notes:sel.notes.trim(),website:sel.website};
   var ctl=new AbortController(), timer;
   getLocation().then(function(loc){
@@ -619,6 +643,7 @@ function readCache(){ try{ var c=JSON.parse(localStorage.getItem(CACHE)||'null')
 function applyPayload(res){
   DAYS=res.days||{}; USED=res.used||{}; PUSED=res.pused||{}; OFF=res.off||{}; ver=res.v||'';
   applyText(res.settings); renderPayOptions();
+  if(res.locations){ LOCS=res.locations; renderLocs(); }
   var ICONS=['🎤','🔊','🎉'], selT=(pkgById(sel.pkg)||{}).title, adQ={}; chosenAddons().forEach(function(x){adQ[x.title]=x.q});
   if(res.packages&&res.packages.length) CONFIG.packages=res.packages.map(function(p,i){p.id=slug(p.title);p.icon=ICONS[i%3];return p});
   if(res.addons) CONFIG.addons=res.addons.map(function(x){x.id=slug(x.title);return x});
